@@ -107,10 +107,13 @@ void rtosInit()
         tcb[i].state = STATE_INVALID;
         tcb[i].pid = 0;
     }
-    // REQUIRED: initialize systick for 1ms system timer              //2/7/2019
+    // REQUIRED: initialize systick for 1ms system timer
+    NVIC_ST_RELOAD_R = 39;     // 1 ms i.e N = 40  clock pulses ...loading N-1
+    NVIC_ST_CURRENT_R = 0x01; //  Any value will clear it
+    NVIC_ST_CTRL_R  = 0x05;  //   System clock + No interrupts + Multi-shot mode. // Add Interrupt later
 }
 
-// REQUIRED: Implement prioritization to 8 levels  // Call the function assigning priority?
+// REQUIRED: Implement prioritization to 8 levels  // Call the function assigning priority? and write to fields in structure ?
 int rtosScheduler()
 {
     bool ok;
@@ -128,10 +131,10 @@ int rtosScheduler()
 
 void rtosStart()
 {
-    // REQUIRED: add code to call the first task to be run               Call the first task using fn pointer
+    // REQUIRED: add code to call the first task to be run               Call the first task using fn pointer?
     _fn fn;
     taskCurrent = rtosScheduler();
-    // Add code to initialize the SP with tcb[task_current].sp;
+    // Add code to initialize the SP with tcb[task_current].sp;           Assembly code?
 }
 
 bool createThread(_fn fn, char name[], int priority)
@@ -140,10 +143,10 @@ bool createThread(_fn fn, char name[], int priority)
     uint8_t i = 0;
     bool found = false;
     // REQUIRED: store the thread name
-    // add task if room in task list                 //Add name to task list if not full
+    // add task if room in task list                 //Add name to task list if not full?
     if (taskCount < MAX_TASKS)
     {
-        // make sure fn not already in list (prevent reentrancy)        // found = true if name already in list
+        // make sure fn not already in list (prevent re-entrance)        // found = true if name already in list ?
         while (!found && (i < MAX_TASKS))
         {
             found = (tcb[i++].pid ==  fn);
@@ -241,6 +244,44 @@ void initHw()
 {
   // REQUIRED: Add initialization for blue, orange, red, green, and yellow LEDs
   //           5 pushbuttons, and uart
+               SYSCTL_RCC_R = SYSCTL_RCC_XTAL_16MHZ | SYSCTL_RCC_OSCSRC_MAIN | SYSCTL_RCC_USESYSDIV | (4 << SYSCTL_RCC_SYSDIV_S);
+
+            // Set GPIO ports to use AP (not needed since default configuration -- for clarity)
+               SYSCTL_GPIOHBCTL_R = 0;
+
+            // Enable GPIO port F peripherals
+               SYSCTL_RCGC2_R = SYSCTL_RCGC2_GPIOF|SYSCTL_RCGC2_GPIOE|SYSCTL_RCGC2_GPIOA;
+
+            // Configure LEDs
+
+               GPIO_PORTF_DIR_R = 0x04;
+               GPIO_PORTF_DR2R_R = 0x04; // set drive strength to 2mA (not needed since default configuration -- for clarity)
+               GPIO_PORTF_DEN_R = 0x04;
+
+               GPIO_PORTE_DIR_R = 0x1E;
+               GPIO_PORTE_DR2R_R = 0x1E;
+               GPIO_PORTE_DEN_R = 0x1E;
+
+            // Configure PBs
+
+               GPIO_PORTA_DEN_R = 0x7C;
+               GPIO_PORTA_PUR_R = 0x7C;
+
+            // Configure UART0 pins
+
+               SYSCTL_RCGCUART_R |= SYSCTL_RCGCUART_R0;         // turn-on UART0, leave other uarts in same status
+               GPIO_PORTA_DEN_R |= 3;                           // default, added for clarity
+               GPIO_PORTA_AFSEL_R |= 3;                         // default, added for clarity
+               GPIO_PORTA_PCTL_R = GPIO_PCTL_PA1_U0TX | GPIO_PCTL_PA0_U0RX;
+
+            // Configure UART0 to 115200 baud, 8N1 format (must be 3 clocks from clock enable and config writes)
+
+               UART0_CTL_R = 0;                                 // turn-off UART0 to allow safe programming
+               UART0_CC_R = UART_CC_CS_SYSCLK;                  // use system clock (40 MHz)
+               UART0_IBRD_R = 21;                               // r = 40 MHz / (Nx115.2kHz), set floor(r)=21, where N=16
+               UART0_FBRD_R = 45;                               // round(fract(r)*64)=45
+               UART0_LCRH_R = UART_LCRH_WLEN_8 | UART_LCRH_FEN; // configure for 8N1 w/ 16-level FIFO
+               UART0_CTL_R = UART_CTL_TXE | UART_CTL_RXE | UART_CTL_UARTEN; // enable TX, RX, and module
 }
 
 // Approximate busy waiting (in units of microseconds), given a 40 MHz system clock
