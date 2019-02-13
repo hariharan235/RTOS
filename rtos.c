@@ -54,6 +54,7 @@
 // function pointer
 typedef void (*_fn)();
 
+
 // semaphore
 #define MAX_SEMAPHORES 5
 #define MAX_QUEUE_SIZE 5
@@ -79,6 +80,8 @@ uint8_t taskCurrent = 0;   // index of last dispatched task
 uint8_t taskCount = 0;     // total number of valid tasks
 
 uint32_t stack[MAX_TASKS][256];  // 1024 byte stack for each thread
+
+
 
 struct _tcb
 {
@@ -108,12 +111,12 @@ void rtosInit()
         tcb[i].pid = 0;
     }
     // REQUIRED: initialize systick for 1ms system timer
-    NVIC_ST_RELOAD_R = 39;     // 1 ms i.e N = 40  clock pulses ...loading N-1
-    NVIC_ST_CURRENT_R = 0x01; //  Any value will clear it
+    NVIC_ST_RELOAD_R = 39999;     // 1 millisecond i.e  N = 40,000  clock pulses ...loading N-1
+    NVIC_ST_CURRENT_R = 0x01; //  Any value will clear it + count bit in CTRL_R
     NVIC_ST_CTRL_R  = 0x05;  //   System clock + No interrupts + Multi-shot mode. // Add Interrupt later
 }
 
-// REQUIRED: Implement prioritization to 8 levels  // Call the function assigning priority? and write to fields in structure ?
+// REQUIRED: Implement prioritization to 8 levels  // Call the function assigning priority? and write to fields in structure ? Return winning task + rr
 int rtosScheduler()
 {
     bool ok;
@@ -134,7 +137,11 @@ void rtosStart()
     // REQUIRED: add code to call the first task to be run               Call the first task using fn pointer?
     _fn fn;
     taskCurrent = rtosScheduler();
-    // Add code to initialize the SP with tcb[task_current].sp;           Assembly code?
+    tcb[taskCurrent].state = 2;
+    __set_MSP((uint32_t)tcb[taskCurrent].sp);
+    fn = (_fn)tcb[taskCurrent].pid;
+    (*fn)();
+    // Add code to initialize the SP with tcb[task_current].sp;
 }
 
 bool createThread(_fn fn, char name[], int priority)
@@ -172,7 +179,7 @@ bool createThread(_fn fn, char name[], int priority)
 
 // REQUIRED: modify this function to destroy a thread
 // REQUIRED: remove any pending semaphore waiting
-void destroyThread(_fn fn)
+/*void destroyThread(_fn fn)
 {
 }
 
@@ -194,10 +201,14 @@ struct semaphore* createSemaphore(uint8_t count)
 
 // REQUIRED: modify this function to yield execution back to scheduler using pendsv
 // push registers, call scheduler, pop registers, return to new function
+*/
 void yield()
 {
+    __asm("           SVC #100");
+
 }
 
+/*
 // REQUIRED: modify this function to support 1ms system timer
 // execution yielded back to scheduler until time elapses using pendsv
 // push registers, set state to delayed, store timeout, call scheduler, pop registers,
@@ -219,8 +230,10 @@ void post(struct semaphore *pSemaphore)
 
 // REQUIRED: modify this function to add support for the system timer
 // REQUIRED: in preemptive code, add code to request task switch
+ */
 void systickIsr()
 {
+
 }
 
 // REQUIRED: in coop and preemptive, modify this function to add support for task switching
@@ -233,12 +246,17 @@ void pendSvIsr()
 // REQUIRED: in preemptive code, add code to handle synchronization primitives
 void svCallIsr()
 {
+     __asm(" LDR  r0,[sp,#0x18]");
+     __asm(" LDRH r0,[r0,#-2]");
+     __asm(" BIC  r0,r0,#0xFF00");
+
+     //Need to Branch based on value in r0
+
 }
 
 //-----------------------------------------------------------------------------
 // Subroutines
 //-----------------------------------------------------------------------------
-
 // Initialize Hardware
 void initHw()
 {
@@ -327,7 +345,7 @@ void idle()
         yield();
     }
 }
-
+/*
 void flash4Hz()
 {
     while(true)
@@ -463,7 +481,7 @@ void shell()
 //-----------------------------------------------------------------------------
 // Main
 //-----------------------------------------------------------------------------
-
+*/
 int main(void)
 {
     bool ok;
@@ -479,15 +497,16 @@ int main(void)
     waitMicrosecond(250000);
 
     // Initialize semaphores
-    keyPressed = createSemaphore(1);
+    /*keyPressed = createSemaphore(1);
     keyReleased = createSemaphore(0);
     flashReq = createSemaphore(5);
     resource = createSemaphore(1);
+    */
 
     // Add required idle process at lowest priority
     ok =  createThread(idle, "Idle", 7);
 
-    // Add other processes
+    /*// Add other processes
     ok &= createThread(lengthyFn, "LengthyFn", 4);
     ok &= createThread(flash4Hz, "Flash4Hz", 0);
     ok &= createThread(oneshot, "OneShot", -4);
@@ -496,6 +515,7 @@ int main(void)
     ok &= createThread(important, "Important", -8);
     ok &= createThread(uncooperative, "Uncoop", 2);
     ok &= createThread(shell, "Shell", 0);
+    */
 
     // Start up RTOS
     if (ok)
