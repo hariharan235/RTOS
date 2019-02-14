@@ -78,9 +78,9 @@ struct semaphore *keyPressed, *keyReleased, *flashReq, *resource;
 #define MAX_TASKS 10       // maximum number of valid tasks
 uint8_t taskCurrent = 0;   // index of last dispatched task
 uint8_t taskCount = 0;     // total number of valid tasks
-
 uint32_t stack[MAX_TASKS][256];  // 1024 byte stack for each thread
-
+uint8_t svc_number;
+#define svc_yield 100
 
 
 struct _tcb
@@ -240,6 +240,7 @@ void systickIsr()
 // REQUIRED: process UNRUN and READY tasks differently
 void pendSvIsr()
 {
+
 }
 
 // REQUIRED: modify this function to add support for the service call
@@ -249,9 +250,19 @@ void svCallIsr()
      __asm(" LDR  r0,[sp,#0x18]");
      __asm(" LDRH r0,[r0,#-2]");
      __asm(" BIC  r0,r0,#0xFF00");
+     __asm(" MOV r2,sp");
+     __asm(" MOV  sp,r0");
+     svc_number = __get_MSP();
+     __asm(" MOV sp,r2");
 
-     //Need to Branch based on value in r0
-
+     switch(svc_number)
+     {
+     case svc_yield:
+         NVIC_INT_CTRL_R = 0x10000000;
+         break;
+     }
+     __asm(" BX LR");
+     //Need to Branch based on value in
 }
 
 //-----------------------------------------------------------------------------
