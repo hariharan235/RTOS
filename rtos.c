@@ -80,6 +80,7 @@ uint8_t taskCurrent = 0;   // index of last dispatched task
 uint8_t taskCount = 0;     // total number of valid tasks
 uint32_t stack[MAX_TASKS][256];  // 1024 byte stack for each thread
 uint8_t svc_number;
+void *sp_system;
 #define svc_yield 100
 
 
@@ -136,8 +137,9 @@ void rtosStart()
 {
     // REQUIRED: add code to call the first task to be run               Call the first task using fn pointer?
     _fn fn;
+    sp_system = (void *)__get_MSP();
     taskCurrent = rtosScheduler();
-    tcb[taskCurrent].state = 2;
+    tcb[taskCurrent].state = STATE_READY;
     __set_MSP((uint32_t)tcb[taskCurrent].sp);
     fn = (_fn)tcb[taskCurrent].pid;
     (*fn)();
@@ -240,7 +242,28 @@ void systickIsr()
 // REQUIRED: process UNRUN and READY tasks differently
 void pendSvIsr()
 {
+__asm(" PUSH {r4-r11}");
+tcb[taskCurrent].sp = (void *)__get_MSP();
+//taskCurrent = rtosScheduler();
+__set_MSP((uint32_t)sp_system);
+if(tcb[taskCurrent].state == 2)
+{
+__set_MSP((uint32_t)tcb[taskCurrent].sp);
 
+
+}
+else if(tcb[taskCurrent].state == 1)
+{
+__asm(" mov lr,#0xFF000000");
+__asm(" orr lr,lr,#0x00FF0000");
+__asm(" orr lr,lr,#0x0000FF00");
+__asm(" orr lr,lr,#0x000000F9");
+__asm(" PUSH {r4-r11}");
+__set_MSP((uint32_t)tcb[taskCurrent].sp);
+
+}
+__asm(" POP {r4-r11}");
+__asm(" BX LR");
 }
 
 // REQUIRED: modify this function to add support for the service call
@@ -353,6 +376,17 @@ void idle()
         ORANGE_LED = 1;
         waitMicrosecond(1000);
         ORANGE_LED = 0;
+        yield();
+    }
+}
+
+void idle2()
+{
+    while(true)
+    {
+        GREEN_LED = 1;
+        waitMicrosecond(1000);
+        GREEN_LED = 0;
         yield();
     }
 }
@@ -516,7 +550,7 @@ int main(void)
 
     // Add required idle process at lowest priority
     ok =  createThread(idle, "Idle", 7);
-
+    ok =  createThread(idle2,"Idle2",7);
     /*// Add other processes
     ok &= createThread(lengthyFn, "LengthyFn", 4);
     ok &= createThread(flash4Hz, "Flash4Hz", 0);
