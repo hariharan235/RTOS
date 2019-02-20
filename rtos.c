@@ -80,6 +80,7 @@ uint8_t taskCurrent = 0;   // index of last dispatched task
 uint8_t taskCount = 0;     // total number of valid tasks
 uint32_t stack[MAX_TASKS][256];  // 1024 byte stack for each thread
 uint8_t svc_number;
+void *a;
 void *sp_system;
 #define svc_yield 100
 
@@ -242,27 +243,43 @@ void systickIsr()
 // REQUIRED: process UNRUN and READY tasks differently
 void pendSvIsr()
 {
+__asm(" ADD sp,#24");
 __asm(" PUSH {r4-r11}");
 tcb[taskCurrent].sp = (void *)__get_MSP();
-//taskCurrent = rtosScheduler();
+taskCurrent = rtosScheduler();
 __set_MSP((uint32_t)sp_system);
+
 if(tcb[taskCurrent].state == 2)
 {
 __set_MSP((uint32_t)tcb[taskCurrent].sp);
-
-
+__asm(" ADD sp,#8");// go to interrupted point by pendsv
+__asm(" POP {r4-r11}");
+__asm(" SUB sp,#24");
 }
 else if(tcb[taskCurrent].state == 1)
 {
+   tcb[taskCurrent].state = 2;
+ __set_MSP(((uint32_t)tcb[taskCurrent].sp - 8));
+__asm(" SUB sp,#0x24"); //Now it is an exception handler
+__asm(" MOV r0,#0x00000000");
+__asm(" ADD sp,#0x14");
+__asm(" STR r0,[sp]");
+__asm(" ADD sp,#0x4");
+a = tcb[taskCurrent].pid;
+__asm(" STR r0,[sp]");
+__asm(" ADD sp,#0x4");
+__asm(" MOV r0,#0x41000000");
+__asm(" orr r0,#0x00000200");
+__asm(" STR r0,[sp]");
+__set_MSP(((uint32_t)tcb[taskCurrent].sp - 8));
+__asm(" SUB sp,#0x24");
+
+}
+
 __asm(" mov lr,#0xFF000000");
 __asm(" orr lr,lr,#0x00FF0000");
 __asm(" orr lr,lr,#0x0000FF00");
 __asm(" orr lr,lr,#0x000000F9");
-__asm(" PUSH {r4-r11}");
-__set_MSP((uint32_t)tcb[taskCurrent].sp);
-
-}
-__asm(" POP {r4-r11}");
 __asm(" BX LR");
 }
 
@@ -548,7 +565,7 @@ int main(void)
     resource = createSemaphore(1);
     */
 
-    // Add required idle process at lowest priority
+    // Add required idle processes at lowest priority
     ok =  createThread(idle, "Idle", 7);
     ok =  createThread(idle2,"Idle2",7);
     /*// Add other processes
