@@ -82,8 +82,9 @@ uint32_t stack[MAX_TASKS][256];  // 1024 byte stack for each thread
 uint8_t svc_number;
 void *a;
 void *sp_system;
-#define svc_yield 100
-
+#define svc_yield 1
+#define svc_sleep 2
+#define svc_wait  3
 
 struct _tcb
 {
@@ -113,9 +114,9 @@ void rtosInit()
         tcb[i].pid = 0;
     }
     // REQUIRED: initialize systick for 1ms system timer
-    NVIC_ST_RELOAD_R = 39999;     // 1 millisecond i.e  N = 40,000  clock pulses ...loading N-1
-    NVIC_ST_CURRENT_R = 0x01; //  Any value will clear it + count bit in CTRL_R
-    NVIC_ST_CTRL_R  = 0x05;  //   System clock + No interrupts + Multi-shot mode. // Add Interrupt later
+    NVIC_ST_RELOAD_R |= 39999;     // 1 millisecond i.e  N = 40,000  clock pulses ...loading N-1 ; 1khz timer
+    NVIC_ST_CURRENT_R |= 0x01; //  Any value will clear it + count bit in CTRL_R
+    NVIC_ST_CTRL_R  |= 0x07;  //   System clock + with interrupt + Multi-shot mode.
 }
 
 // REQUIRED: Implement prioritization to 8 levels  // Call the function assigning priority? and write to fields in structure ? Return winning task + rr
@@ -136,7 +137,7 @@ int rtosScheduler()
 
 void rtosStart()
 {
-    // REQUIRED: add code to call the first task to be run               Call the first task using fn pointer?
+    // REQUIRED: add code to call the first task to be run
     _fn fn;
     sp_system = (void *)__get_MSP();
     taskCurrent = rtosScheduler();
@@ -190,7 +191,7 @@ bool createThread(_fn fn, char name[], int priority)
 void setThreadPriority(_fn fn, uint8_t priority)
 {
 }
-
+*/
 struct semaphore* createSemaphore(uint8_t count)
 {
     struct semaphore *pSemaphore = 0;
@@ -202,30 +203,36 @@ struct semaphore* createSemaphore(uint8_t count)
     return pSemaphore;
 }
 
+void* getr0(void)
+{
+    __asm(" MOV r0,r0");
+}
 // REQUIRED: modify this function to yield execution back to scheduler using pendsv
 // push registers, call scheduler, pop registers, return to new function
-*/
 void yield()
 {
-    __asm("           SVC #100");
+    __asm(" SVC #1");
 
 }
 
-/*
+
 // REQUIRED: modify this function to support 1ms system timer
 // execution yielded back to scheduler until time elapses using pendsv
 // push registers, set state to delayed, store timeout, call scheduler, pop registers,
 // return to new function (separate unrun or ready processing)
 void sleep(uint32_t tick)
 {
+    __asm(" SVC #2");
+
 }
 
 // REQUIRED: modify this function to wait a semaphore with priority inheritance
 // return if avail (separate unrun or ready processing), else yield to scheduler using pendsv
 void wait(struct semaphore *pSemaphore)
 {
+    __asm(" SVC #3");
 }
-
+/*
 // REQUIRED: modify this function to signal a semaphore is available using pendsv
 void post(struct semaphore *pSemaphore)
 {
@@ -236,7 +243,21 @@ void post(struct semaphore *pSemaphore)
  */
 void systickIsr()
 {
-
+uint16_t cnt ; // Since idle will never be delayed 2 bytes for 9 tasks.
+// Find all delayed tasks
+//Reduce the ticks of all delayed tasks
+for(cnt = 0 ; cnt < MAX_TASKS ; cnt++)     //For all tasks
+{
+     if(tcb[cnt].state == 3)
+     {
+         if(tcb[cnt].ticks == 0)
+         {
+           tcb[cnt].state = 2;
+           continue;
+         }
+         tcb[cnt].ticks--;
+      }
+}
 }
 
 // REQUIRED: in coop and preemptive, modify this function to add support for task switching
@@ -287,22 +308,33 @@ __asm(" BX LR");
 // REQUIRED: in preemptive code, add code to handle synchronization primitives
 void svCallIsr()
 {
+     uint32_t svc_number,arg1;
+     //int8_t arg2;
+     __asm(" ADD sp,#0x10");
      __asm(" LDR  r0,[sp,#0x18]");
      __asm(" LDRH r0,[r0,#-2]");
      __asm(" BIC  r0,r0,#0xFF00");
-     __asm(" MOV r2,sp");
-     __asm(" MOV  sp,r0");
-     svc_number = __get_MSP();
-     __asm(" MOV sp,r2");
-
+      svc_number = (uint32_t)getr0();
+     __asm(" LDR r0,[sp,#0x24]");
+      arg1 = (uint32_t)getr0();
+     //__asm(" LDR r0,[sp,#0x48]");
+     //  arg2 = (uint32_t)getr0();
      switch(svc_number)
      {
      case svc_yield:
          NVIC_INT_CTRL_R = 0x10000000;
          break;
+     case svc_sleep:
+         tcb[taskCurrent].ticks = arg1;
+         tcb[taskCurrent].state = STATE_DELAYED;
+         NVIC_INT_CTRL_R = 0x10000000;
+         break;
      }
+     __asm(" mov lr,#0xFF000000");
+     __asm(" orr lr,lr,#0x00FF0000");
+     __asm(" orr lr,lr,#0x0000FF00");
+     __asm(" orr lr,lr,#0x000000F9");
      __asm(" BX LR");
-     //Need to Branch based on value in
 }
 
 //-----------------------------------------------------------------------------
@@ -379,7 +411,6 @@ uint8_t readPbs()
 // YOUR UNIQUE CODE
 // REQUIRED: add any custom code in this space
 //-----------------------------------------------------------------------------
-
 // ------------------------------------------------------------------------------
 //  Task functions
 // ------------------------------------------------------------------------------
@@ -397,17 +428,6 @@ void idle()
     }
 }
 
-void idle2()
-{
-    while(true)
-    {
-        GREEN_LED = 1;
-        waitMicrosecond(1000);
-        GREEN_LED = 0;
-        yield();
-    }
-}
-/*
 void flash4Hz()
 {
     while(true)
@@ -417,7 +437,7 @@ void flash4Hz()
     }
 }
 
-void oneshot()
+/*void oneshot()
 {
     while(true)
     {
@@ -559,15 +579,15 @@ int main(void)
     waitMicrosecond(250000);
 
     // Initialize semaphores
-    /*keyPressed = createSemaphore(1);
-    keyReleased = createSemaphore(0);
+    //keyPressed = createSemaphore(1);
+    //keyReleased = createSemaphore(0);
     flashReq = createSemaphore(5);
-    resource = createSemaphore(1);
-    */
+    //resource = createSemaphore(1);
+
 
     // Add required idle processes at lowest priority
     ok =  createThread(idle, "Idle", 7);
-    ok =  createThread(idle2,"Idle2",7);
+    ok &= createThread(flash4Hz, "Flash4Hz", 0);
     /*// Add other processes
     ok &= createThread(lengthyFn, "LengthyFn", 4);
     ok &= createThread(flash4Hz, "Flash4Hz", 0);
