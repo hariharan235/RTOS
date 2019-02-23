@@ -85,6 +85,7 @@ void *sp_system;
 #define svc_yield 1
 #define svc_sleep 2
 #define svc_wait  3
+#define svc_post 4
 
 struct _tcb
 {
@@ -119,11 +120,12 @@ void rtosInit()
     NVIC_ST_CTRL_R  |= 0x07;  //   System clock + with interrupt + Multi-shot mode.
 }
 
-// REQUIRED: Implement prioritization to 8 levels  // Call the function assigning priority? and write to fields in structure ? Return winning task + rr
+// REQUIRED: Implement prioritization to 8 levels
 int rtosScheduler()
 {
     bool ok;
     static uint8_t task = 0xFF;
+    //static uint16_t skip = 0;
     ok = false;
     while (!ok)
     {
@@ -207,6 +209,7 @@ void* getr0(void)
 {
     __asm(" MOV r0,r0");
 }
+
 // REQUIRED: modify this function to yield execution back to scheduler using pendsv
 // push registers, call scheduler, pop registers, return to new function
 void yield()
@@ -232,15 +235,15 @@ void wait(struct semaphore *pSemaphore)
 {
     __asm(" SVC #3");
 }
-/*
+
 // REQUIRED: modify this function to signal a semaphore is available using pendsv
 void post(struct semaphore *pSemaphore)
 {
+    __asm(" SVC #4");
 }
 
 // REQUIRED: modify this function to add support for the system timer
 // REQUIRED: in preemptive code, add code to request task switch
- */
 void systickIsr()
 {
 uint16_t cnt ; // Since idle will never be delayed 2 bytes for 9 tasks.
@@ -273,7 +276,7 @@ __set_MSP((uint32_t)sp_system);
 if(tcb[taskCurrent].state == 2)
 {
 __set_MSP((uint32_t)tcb[taskCurrent].sp);
-__asm(" ADD sp,#8");// go to interrupted point by pendsv
+__asm(" ADD sp,#8");
 __asm(" POP {r4-r11}");
 __asm(" SUB sp,#24");
 }
@@ -309,8 +312,8 @@ __asm(" BX LR");
 void svCallIsr()
 {
      uint32_t svc_number,arg1;
-     //int8_t arg2;
-     __asm(" ADD sp,#0x10");
+     void *temp; uint8_t i;
+     __asm(" ADD sp,#0x18");  //Update number as per number of variables used
      __asm(" LDR  r0,[sp,#0x18]");
      __asm(" LDRH r0,[r0,#-2]");
      __asm(" BIC  r0,r0,#0xFF00");
@@ -329,6 +332,47 @@ void svCallIsr()
          tcb[taskCurrent].state = STATE_DELAYED;
          NVIC_INT_CTRL_R = 0x10000000;
          break;
+     case svc_wait:
+          temp = (&semaphores);
+          arg1 = arg1 - (uint32_t)temp;
+          arg1 = arg1 / 24;
+          if(semaphores[arg1].count > 0)
+          {
+             semaphores[arg1].count--;
+          }
+          else
+          {
+             if(semaphores[arg1].processQueue[(semaphores[arg1].queueSize)-1] != taskCurrent) // Improve this.
+              {
+                 semaphores[arg1].processQueue[semaphores[arg1].queueSize] = taskCurrent;
+                 tcb[taskCurrent].state = STATE_BLOCKED;
+                 tcb[taskCurrent].semaphore = (void *)arg1;
+                 semaphores[arg1].queueSize++;
+                 NVIC_INT_CTRL_R = 0x10000000;
+              }
+          }
+           break;
+     case svc_post:
+              temp = (&semaphores);
+              arg1 = arg1 - (uint32_t)temp;
+              arg1 = arg1 / 24;
+              semaphores[arg1].count++;
+              if(semaphores[arg1].count == 1)
+              {
+                  if(semaphores[arg1].queueSize > 0)
+                  {
+                      tcb[semaphores[arg1].processQueue[0]].state = 2;
+                      semaphores[arg1].queueSize--;
+                      for(i=0;i<((semaphores[arg1].queueSize)-1);i++)
+                      {
+                          semaphores[arg1].processQueue[i] = semaphores[arg1].processQueue[i+1];
+
+                      }
+                      semaphores[arg1].processQueue[semaphores[arg1].queueSize] = 0;
+                      //NVIC_INT_CTRL_R = 0x10000000;
+                  }
+              }
+              break;
      }
      __asm(" mov lr,#0xFF000000");
      __asm(" orr lr,lr,#0x00FF0000");
@@ -437,7 +481,7 @@ void flash4Hz()
     }
 }
 
-/*void oneshot()
+void oneshot()
 {
     while(true)
     {
@@ -447,6 +491,7 @@ void flash4Hz()
         YELLOW_LED = 0;
     }
 }
+
 
 void partOfLengthyFn()
 {
@@ -470,7 +515,7 @@ void lengthyFn()
         post(resource);
     }
 }
-
+/*
 void readKeys()
 {
     uint8_t buttons;
@@ -539,7 +584,7 @@ void uncooperative()
         yield();
     }
 }
-
+*/
 void important()
 {
     while(true)
@@ -551,7 +596,7 @@ void important()
         post(resource);
     }
 }
-
+/*
 void shell()
 {
     while (true)
@@ -582,19 +627,19 @@ int main(void)
     //keyPressed = createSemaphore(1);
     //keyReleased = createSemaphore(0);
     flashReq = createSemaphore(5);
-    //resource = createSemaphore(1);
+    resource = createSemaphore(1);
 
 
-    // Add required idle processes at lowest priority
+    // Add required idle processes at lowest priority //Order was changed
     ok =  createThread(idle, "Idle", 7);
-    ok &= createThread(flash4Hz, "Flash4Hz", 0);
-    /*// Add other processes
-    ok &= createThread(lengthyFn, "LengthyFn", 4);
-    ok &= createThread(flash4Hz, "Flash4Hz", 0);
+    // Add other processes
+    ok &= createThread(important, "Important", -8);
     ok &= createThread(oneshot, "OneShot", -4);
+    ok &= createThread(flash4Hz, "Flash4Hz", 0);
+    ok &= createThread(lengthyFn, "LengthyFn", 4);
+    /*// Add other processes
     ok &= createThread(readKeys, "ReadKeys", 4);
     ok &= createThread(debounce, "Debounce", 4);
-    ok &= createThread(important, "Important", -8);
     ok &= createThread(uncooperative, "Uncoop", 2);
     ok &= createThread(shell, "Shell", 0);
     */
