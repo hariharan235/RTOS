@@ -80,6 +80,7 @@ uint8_t taskCurrent = 0;   // index of last dispatched task
 uint8_t taskCount = 0;     // total number of valid tasks
 uint32_t stack[MAX_TASKS][256];  // 1024 byte stack for each thread
 uint8_t svc_number;
+bool RTX = true;
 void *a;
 void *sp_system;
 #define svc_yield 1
@@ -93,6 +94,7 @@ struct _tcb
     void *pid;                     // used to uniquely identify thread
     void *sp;                      // location of stack pointer for thread
     int8_t priority;               // -8=highest to 7=lowest
+    uint16_t skip_count;           // For priority scheduling
     int8_t currentPriority;        // used for priority inheritance
     uint32_t ticks;                // ticks until sleep complete
     char name[16];                 // name of task used in ps command
@@ -125,7 +127,6 @@ int rtosScheduler()
 {
     bool ok;
     static uint8_t task = 0xFF;
-    //static uint16_t skip = 0;
     ok = false;
     while (!ok)
     {
@@ -133,8 +134,23 @@ int rtosScheduler()
         if (task >= MAX_TASKS)
             task = 0;
         ok = (tcb[task].state == STATE_READY || tcb[task].state == STATE_UNRUN);
-    }
-    return task;
+        if(ok)
+        {
+           if(tcb[task].state == 1 || RTX == false)
+               return task;
+           else
+           {
+               if(tcb[task].skip_count == 0)
+               {
+                  tcb[task].skip_count = tcb[task].priority + 8;
+                  return task;
+               }
+               else
+                  tcb[task].skip_count--;
+           }
+           ok &= false;
+         }
+     }
 }
 
 void rtosStart()
@@ -249,7 +265,7 @@ void systickIsr()
 uint16_t cnt ; // Since idle will never be delayed 2 bytes for 9 tasks.
 // Find all delayed tasks
 //Reduce the ticks of all delayed tasks
-for(cnt = 0 ; cnt < MAX_TASKS ; cnt++)     //For all tasks
+for(cnt = 1 ; cnt < MAX_TASKS ; cnt++)     //For all tasks
 {
      if(tcb[cnt].state == 3)
      {
@@ -630,13 +646,15 @@ int main(void)
     resource = createSemaphore(1);
 
 
-    // Add required idle processes at lowest priority //Order was changed
+    // Add required idle processes at lowest priority // Order was changed
     ok =  createThread(idle, "Idle", 7);
     // Add other processes
-    ok &= createThread(important, "Important", -8);
-    ok &= createThread(oneshot, "OneShot", -4);
-    ok &= createThread(flash4Hz, "Flash4Hz", 0);
     ok &= createThread(lengthyFn, "LengthyFn", 4);
+    ok &= createThread(flash4Hz, "Flash4Hz", 0);
+    ok &= createThread(oneshot, "OneShot", -4);
+    //ok &= createThread(readKeys, "ReadKeys", 4);
+    //ok &= createThread(debounce, "Debounce", 4);
+    ok &= createThread(important, "Important", -8);
     /*// Add other processes
     ok &= createThread(readKeys, "ReadKeys", 4);
     ok &= createThread(debounce, "Debounce", 4);
