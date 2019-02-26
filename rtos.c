@@ -39,7 +39,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include "tm4c123gh6pm.h"
-
+//#include <string.h>
 // REQUIRED: correct these bit-banding references for the off-board LEDs
 #define BLUE_LED     (*((volatile uint32_t *)(0x42000000 + (0x400253FC-0x40000000)*32 + 2*4))) // on-board blue LED
 #define RED_LED      (*((volatile uint32_t *)(0x42000000 + (0x400243FC-0x40000000)*32 + 1*4))) // off-board red LED
@@ -63,11 +63,13 @@ struct semaphore
     uint16_t count;
     uint16_t queueSize;
     uint32_t processQueue[MAX_QUEUE_SIZE]; // store task index here
+    uint16_t currentUser;
 } semaphores[MAX_SEMAPHORES];
 uint8_t semaphoreCount = 0;
 
 struct semaphore *keyPressed, *keyReleased, *flashReq, *resource;
 
+#define MIN(x, y) (((x) < (y)) ? (x) : (y))
 // task
 #define STATE_INVALID    0 // no task
 #define STATE_UNRUN      1 // task has never been run
@@ -80,7 +82,8 @@ uint8_t taskCurrent = 0;   // index of last dispatched task
 uint8_t taskCount = 0;     // total number of valid tasks
 uint32_t stack[MAX_TASKS][256];  // 1024 byte stack for each thread
 uint8_t svc_number;
-bool RTX = true;
+bool rtos = true;
+bool pi = true;
 void *a;
 void *sp_system;
 #define svc_yield 1
@@ -136,21 +139,23 @@ int rtosScheduler()
         ok = (tcb[task].state == STATE_READY || tcb[task].state == STATE_UNRUN);
         if(ok)
         {
-           if(tcb[task].state == 1 || RTX == false)
+           if(tcb[task].state == 1 || rtos == false)
                return task;
            else
            {
                if(tcb[task].skip_count == 0)
                {
-                  tcb[task].skip_count = tcb[task].priority + 8;
+                  tcb[task].skip_count = tcb[task].currentPriority + 8;
                   return task;
                }
                else
                   tcb[task].skip_count--;
            }
-           ok &= false;
+           ok = false;
          }
+
      }
+    //return task;
 }
 
 void rtosStart()
@@ -217,6 +222,7 @@ struct semaphore* createSemaphore(uint8_t count)
     {
         pSemaphore = &semaphores[semaphoreCount++];
         pSemaphore->count = count;
+
     }
     return pSemaphore;
 }
@@ -262,7 +268,8 @@ void post(struct semaphore *pSemaphore)
 // REQUIRED: in preemptive code, add code to request task switch
 void systickIsr()
 {
-uint16_t cnt ; // Since idle will never be delayed 2 bytes for 9 tasks.
+uint16_t cnt ; // Since idle will never be delayed
+//2 bytes for 8 tasks.
 // Find all delayed tasks
 //Reduce the ticks of all delayed tasks
 for(cnt = 1 ; cnt < MAX_TASKS ; cnt++)     //For all tasks
@@ -277,6 +284,7 @@ for(cnt = 1 ; cnt < MAX_TASKS ; cnt++)     //For all tasks
          tcb[cnt].ticks--;
       }
 }
+
 }
 
 // REQUIRED: in coop and preemptive, modify this function to add support for task switching
@@ -329,7 +337,7 @@ void svCallIsr()
 {
      uint32_t svc_number,arg1;
      void *temp; uint8_t i;
-     __asm(" ADD sp,#0x18");  //Update number as per number of variables used
+     __asm(" ADD sp,#0x20");  //Update number as per number of variables used
      __asm(" LDR  r0,[sp,#0x18]");
      __asm(" LDRH r0,[r0,#-2]");
      __asm(" BIC  r0,r0,#0xFF00");
@@ -351,28 +359,40 @@ void svCallIsr()
      case svc_wait:
           temp = (&semaphores);
           arg1 = arg1 - (uint32_t)temp;
-          arg1 = arg1 / 24;
+          arg1 = arg1 / 28;
           if(semaphores[arg1].count > 0)
           {
              semaphores[arg1].count--;
+             semaphores[arg1].currentUser = taskCurrent;
+
           }
           else
           {
              if(semaphores[arg1].processQueue[(semaphores[arg1].queueSize)-1] != taskCurrent) // Improve this.
-              {
+             {
                  semaphores[arg1].processQueue[semaphores[arg1].queueSize] = taskCurrent;
                  tcb[taskCurrent].state = STATE_BLOCKED;
                  tcb[taskCurrent].semaphore = (void *)arg1;
                  semaphores[arg1].queueSize++;
                  NVIC_INT_CTRL_R = 0x10000000;
-              }
+             }
+             if(tcb[taskCurrent].state == STATE_BLOCKED && pi == true)
+             {
+                 if(tcb[semaphores[arg1].currentUser].priority > tcb[taskCurrent].priority)
+                 {
+                     tcb[semaphores[arg1].currentUser].currentPriority = MIN(tcb[semaphores[arg1].currentUser].priority,tcb[taskCurrent].priority);
+
+                 }
+             }
+
           }
            break;
      case svc_post:
               temp = (&semaphores);
               arg1 = arg1 - (uint32_t)temp;
-              arg1 = arg1 / 24;
+              arg1 = arg1 / 28;
               semaphores[arg1].count++;
+              tcb[taskCurrent].currentPriority = tcb[taskCurrent].priority;
               if(semaphores[arg1].count == 1)
               {
                   if(semaphores[arg1].queueSize > 0)
@@ -385,7 +405,7 @@ void svCallIsr()
 
                       }
                       semaphores[arg1].processQueue[semaphores[arg1].queueSize] = 0;
-                      //NVIC_INT_CTRL_R = 0x10000000;
+
                   }
               }
               break;
@@ -531,7 +551,7 @@ void lengthyFn()
         post(resource);
     }
 }
-/*
+
 void readKeys()
 {
     uint8_t buttons;
@@ -561,12 +581,15 @@ void readKeys()
         }
         if ((buttons & 8) != 0)
         {
-            destroyThread(flash4Hz);
+            //destroyThread(flash4Hz);
+
         }
         if ((buttons & 16) != 0)
         {
-            setThreadPriority(lengthyFn, 4);
+            //setThreadPriority(lengthyFn, 4);
+
         }
+
         yield();
     }
 }
@@ -600,7 +623,6 @@ void uncooperative()
         yield();
     }
 }
-*/
 void important()
 {
     while(true)
@@ -640,8 +662,8 @@ int main(void)
     waitMicrosecond(250000);
 
     // Initialize semaphores
-    //keyPressed = createSemaphore(1);
-    //keyReleased = createSemaphore(0);
+    keyPressed = createSemaphore(1);
+    keyReleased = createSemaphore(0);
     flashReq = createSemaphore(5);
     resource = createSemaphore(1);
 
@@ -650,17 +672,14 @@ int main(void)
     ok =  createThread(idle, "Idle", 7);
     // Add other processes
     ok &= createThread(lengthyFn, "LengthyFn", 4);
+    ok &= createThread(important, "Important", -8);
     ok &= createThread(flash4Hz, "Flash4Hz", 0);
     ok &= createThread(oneshot, "OneShot", -4);
-    //ok &= createThread(readKeys, "ReadKeys", 4);
-    //ok &= createThread(debounce, "Debounce", 4);
-    ok &= createThread(important, "Important", -8);
-    /*// Add other processes
     ok &= createThread(readKeys, "ReadKeys", 4);
     ok &= createThread(debounce, "Debounce", 4);
     ok &= createThread(uncooperative, "Uncoop", 2);
-    ok &= createThread(shell, "Shell", 0);
-    */
+    //ok &= createThread(shell, "Shell", 0);
+
 
     // Start up RTOS
     if (ok)
