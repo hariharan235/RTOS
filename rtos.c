@@ -39,7 +39,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include "tm4c123gh6pm.h"
-//#include <string.h>
+#include <string.h>
 // REQUIRED: correct these bit-banding references for the off-board LEDs
 #define BLUE_LED     (*((volatile uint32_t *)(0x42000000 + (0x400253FC-0x40000000)*32 + 2*4))) // on-board blue LED
 #define RED_LED      (*((volatile uint32_t *)(0x42000000 + (0x400243FC-0x40000000)*32 + 1*4))) // off-board red LED
@@ -197,6 +197,8 @@ bool createThread(_fn fn, char name[], int priority)
             tcb[i].sp = &stack[i][255];
             tcb[i].priority = priority;
             tcb[i].currentPriority = priority;
+            strncpy(tcb[i].name,name, sizeof(tcb[i].name)-1);
+            tcb[i].name[sizeof(tcb[i].name) - 1] = '\0';
             // increment task count
             taskCount++;
             ok = true;
