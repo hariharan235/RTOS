@@ -82,14 +82,16 @@ uint8_t taskCurrent = 0;   // index of last dispatched task
 uint8_t taskCount = 0;     // total number of valid tasks
 uint32_t stack[MAX_TASKS][256];  // 1024 byte stack for each thread
 uint8_t svc_number;
-bool rtos = true;
+bool schedule = true;
 bool pi = true;
+bool rtos = false;
 void *a;
 void *sp_system;
 #define svc_yield 1
 #define svc_sleep 2
 #define svc_wait  3
 #define svc_post 4
+#define svc_delete 5
 
 struct _tcb
 {
@@ -122,7 +124,6 @@ void rtosInit()
     // REQUIRED: initialize systick for 1ms system timer
     NVIC_ST_RELOAD_R |= 39999;     // 1 millisecond i.e  N = 40,000  clock pulses ...loading N-1 ; 1khz timer
     NVIC_ST_CURRENT_R |= 0x01; //  Any value will clear it + count bit in CTRL_R
-    NVIC_ST_CTRL_R  |= 0x07;  //   System clock + with interrupt + Multi-shot mode.
 }
 
 // REQUIRED: Implement prioritization to 8 levels
@@ -139,7 +140,7 @@ int rtosScheduler()
         ok = (tcb[task].state == STATE_READY || tcb[task].state == STATE_UNRUN);
         if(ok)
         {
-           if(tcb[task].state == 1 || rtos == false)
+           if(tcb[task].state == 1 || schedule == false)
                return task;
            else
            {
@@ -167,6 +168,7 @@ void rtosStart()
     tcb[taskCurrent].state = STATE_READY;
     __set_MSP((uint32_t)tcb[taskCurrent].sp);
     fn = (_fn)tcb[taskCurrent].pid;
+    NVIC_ST_CTRL_R  |= 0x07;  //   System clock + with interrupt + Multi-shot mode.
     (*fn)();
     // Add code to initialize the SP with tcb[task_current].sp;
 }
@@ -206,15 +208,21 @@ bool createThread(_fn fn, char name[], int priority)
 
 // REQUIRED: modify this function to destroy a thread
 // REQUIRED: remove any pending semaphore waiting
-/*void destroyThread(_fn fn)
+void destroyThread(_fn fn)
 {
+  __asm(" SVC #5");
 }
-
 // REQUIRED: modify this function to set a thread priority
-void setThreadPriority(_fn fn, uint8_t priority)
+void setThreadPriority(_fn fn, uint8_t priority)   // What if thread doesn't exist
 {
+    uint16_t k;
+    for(k = 0; k < MAX_TASKS; k++)
+    {
+        if(tcb[k].pid == fn)
+            break;
+    }
+    tcb[k].priority = priority;
 }
-*/
 struct semaphore* createSemaphore(uint8_t count)
 {
     struct semaphore *pSemaphore = 0;
@@ -284,6 +292,8 @@ for(cnt = 1 ; cnt < MAX_TASKS ; cnt++)     //For all tasks
          tcb[cnt].ticks--;
       }
 }
+if(rtos == true)
+    NVIC_INT_CTRL_R = 0x10000000;
 
 }
 
@@ -336,7 +346,7 @@ __asm(" BX LR");
 void svCallIsr()
 {
      uint32_t svc_number,arg1;
-     void *temp; uint8_t i;
+     void *temp; uint8_t i,j;
      __asm(" ADD sp,#0x20");  //Update number as per number of variables used
      __asm(" LDR  r0,[sp,#0x18]");
      __asm(" LDRH r0,[r0,#-2]");
@@ -409,6 +419,30 @@ void svCallIsr()
                   }
               }
               break;
+     case svc_delete:
+         for(i = 1 ; i < MAX_TASKS ; i++ )
+         {
+             if(tcb[i].pid == (void *)arg1)
+                 break;
+         }
+         if(tcb[i].state == STATE_BLOCKED)
+         {
+             for(j = 0 ; j < semaphores[(uint32_t)tcb[i].semaphore].queueSize;j++)
+             {
+                 if(semaphores[(uint32_t)tcb[i].semaphore].processQueue[j] == i)
+                     break;
+             }
+             semaphores[(uint32_t)tcb[i].semaphore].queueSize--;
+             for(;j<semaphores[(uint32_t)tcb[i].semaphore].queueSize;j++)
+             {
+                 semaphores[(uint32_t)tcb[i].semaphore].processQueue[j] = semaphores[(uint32_t)tcb[i].semaphore].processQueue[j+1];
+             }
+
+
+         }
+         tcb[i].state = STATE_INVALID;
+         tcb[i].pid = 0;
+         break;
      }
      __asm(" mov lr,#0xFF000000");
      __asm(" orr lr,lr,#0x00FF0000");
@@ -581,12 +615,12 @@ void readKeys()
         }
         if ((buttons & 8) != 0)
         {
-            //destroyThread(flash4Hz);
+            destroyThread(flash4Hz);
 
         }
         if ((buttons & 16) != 0)
         {
-            //setThreadPriority(lengthyFn, 4);
+            setThreadPriority(lengthyFn, 4);
 
         }
 
@@ -634,19 +668,25 @@ void important()
         post(resource);
     }
 }
-/*
+
+void kill(_fn fn)
+{
+    //Print available threads
+    // What if thread doesn't exist?
+    destroyThread(fn);
+}
 void shell()
 {
-    while (true)
-    {
+    //while (true)
+    //{
         // REQUIRED: add processing for the shell commands through the UART here
-    }
+
+    //}
 }
 
 //-----------------------------------------------------------------------------
 // Main
 //-----------------------------------------------------------------------------
-*/
 int main(void)
 {
     bool ok;
@@ -671,15 +711,14 @@ int main(void)
     // Add required idle processes at lowest priority // Order was changed
     ok =  createThread(idle, "Idle", 7);
     // Add other processes
-    ok &= createThread(lengthyFn, "LengthyFn", 4);
-    ok &= createThread(important, "Important", -8);
-    ok &= createThread(flash4Hz, "Flash4Hz", 0);
-    ok &= createThread(oneshot, "OneShot", -4);
-    ok &= createThread(readKeys, "ReadKeys", 4);
-    ok &= createThread(debounce, "Debounce", 4);
-    ok &= createThread(uncooperative, "Uncoop", 2);
-    //ok &= createThread(shell, "Shell", 0);
-
+     ok &= createThread(lengthyFn, "LengthyFn", 4);
+     ok &= createThread(flash4Hz, "Flash4Hz", 0);
+     ok &= createThread(oneshot, "OneShot", -4);
+     ok &= createThread(readKeys, "ReadKeys", 4);
+     ok &= createThread(debounce, "Debounce", 4);
+     ok &= createThread(important, "Important", -8);
+     ok &= createThread(uncooperative, "Uncoop", 2);
+     //ok &= createThread(shell, "Shell", 0);
 
     // Start up RTOS
     if (ok)
