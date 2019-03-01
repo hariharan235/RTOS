@@ -84,7 +84,7 @@ uint32_t stack[MAX_TASKS][256];  // 1024 byte stack for each thread
 uint8_t svc_number;
 bool schedule = true;
 bool pi = true;
-bool rtos = false;
+bool rtos = true;
 void *a;
 void *sp_system;
 #define svc_yield 1
@@ -138,25 +138,24 @@ int rtosScheduler()
         if (task >= MAX_TASKS)
             task = 0;
         ok = (tcb[task].state == STATE_READY || tcb[task].state == STATE_UNRUN);
-        if(ok)
+        if(tcb[task].state == 1 || schedule == false)
+               ok &=true;
+        else
         {
-           if(tcb[task].state == 1 || schedule == false)
-               return task;
-           else
-           {
-               if(tcb[task].skip_count == 0)
-               {
-                  tcb[task].skip_count = tcb[task].currentPriority + 8;
-                  return task;
-               }
-               else
-                  tcb[task].skip_count--;
-           }
-           ok = false;
-         }
+            if(tcb[task].skip_count > 0)
+            {
+                   tcb[task].skip_count--;
+                   ok &= false;
+            }
 
+            else
+            {
+                  tcb[task].skip_count = tcb[task].currentPriority + 8;
+                  ok &= true;
+            }
+         }
      }
-    //return task;
+    return task;
 }
 
 void rtosStart()
@@ -197,6 +196,7 @@ bool createThread(_fn fn, char name[], int priority)
             tcb[i].sp = &stack[i][255];
             tcb[i].priority = priority;
             tcb[i].currentPriority = priority;
+            tcb[i].skip_count = priority + 8;
             strncpy(tcb[i].name,name, sizeof(tcb[i].name)-1);
             tcb[i].name[sizeof(tcb[i].name) - 1] = '\0';
             // increment task count
@@ -215,7 +215,7 @@ void destroyThread(_fn fn)
   __asm(" SVC #5");
 }
 // REQUIRED: modify this function to set a thread priority
-void setThreadPriority(_fn fn, uint8_t priority)   // What if thread doesn't exist
+void setThreadPriority(_fn fn, uint8_t priority)
 {
     uint16_t k;
     for(k = 0; k < MAX_TASKS; k++)
@@ -224,6 +224,7 @@ void setThreadPriority(_fn fn, uint8_t priority)   // What if thread doesn't exi
             break;
     }
     tcb[k].priority = priority;
+    tcb[k].currentPriority = priority;
 }
 struct semaphore* createSemaphore(uint8_t count)
 {
