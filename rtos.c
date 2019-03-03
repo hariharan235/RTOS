@@ -83,8 +83,8 @@ uint8_t taskCount = 0;     // total number of valid tasks
 uint32_t stack[MAX_TASKS][256];  // 1024 byte stack for each thread
 uint8_t svc_number;
 bool schedule = true;
-bool pi = true;
-bool rtos = true;
+bool pi = false;
+bool rtos = false;
 void *a;
 void *sp_system;
 #define svc_yield 1
@@ -138,23 +138,26 @@ int rtosScheduler()
         if (task >= MAX_TASKS)
             task = 0;
         ok = (tcb[task].state == STATE_READY || tcb[task].state == STATE_UNRUN);
-        if(tcb[task].state == 1 || schedule == false)
-               ok &=true;
-        else
+        if(ok && schedule == false)
+            break;
+        else if(ok && schedule == true)
         {
-            if(tcb[task].skip_count > 0)
-            {
-                   tcb[task].skip_count--;
-                   ok &= false;
-            }
-
+            if(tcb[task].state == STATE_UNRUN)
+                break;
             else
             {
-                  tcb[task].skip_count = tcb[task].currentPriority + 8;
-                  ok &= true;
-            }
-         }
-     }
+                if(tcb[task].skip_count > 0)
+                {
+                    tcb[task].skip_count--;
+                    ok &= false;
+                }
+                else
+                    tcb[task].skip_count = tcb[task].currentPriority + 8;
+             }
+        }
+        else
+            continue;
+    }
     return task;
 }
 
@@ -279,11 +282,12 @@ void post(struct semaphore *pSemaphore)
 // REQUIRED: in preemptive code, add code to request task switch
 void systickIsr()
 {
-uint16_t cnt ; // Since idle will never be delayed
+uint16_t cnt = 0 ; // Since idle will never be delayed
 //2 bytes for 8 tasks.
 // Find all delayed tasks
 //Reduce the ticks of all delayed tasks
-for(cnt = 1 ; cnt < MAX_TASKS ; cnt++)     //For all tasks
+
+for(cnt = 0 ; cnt < MAX_TASKS ; cnt++)     //For all tasks
 {
      if(tcb[cnt].state == 3)
      {
@@ -296,9 +300,9 @@ for(cnt = 1 ; cnt < MAX_TASKS ; cnt++)     //For all tasks
       }
 }
 if(rtos == true)
-    NVIC_INT_CTRL_R = 0x10000000;
-
+    NVIC_INT_CTRL_R |= 0x10000000;
 }
+
 
 // REQUIRED: in coop and preemptive, modify this function to add support for task switching
 // REQUIRED: process UNRUN and READY tasks differently
@@ -362,12 +366,12 @@ void svCallIsr()
      switch(svc_number)
      {
      case svc_yield:
-         NVIC_INT_CTRL_R = 0x10000000;
+         NVIC_INT_CTRL_R |= 0x10000000;
          break;
      case svc_sleep:
          tcb[taskCurrent].ticks = arg1;
          tcb[taskCurrent].state = STATE_DELAYED;
-         NVIC_INT_CTRL_R = 0x10000000;
+         NVIC_INT_CTRL_R |= 0x10000000;
          break;
      case svc_wait:
           temp = (&semaphores);
@@ -387,7 +391,7 @@ void svCallIsr()
                  tcb[taskCurrent].state = STATE_BLOCKED;
                  tcb[taskCurrent].semaphore = (void *)arg1;
                  semaphores[arg1].queueSize++;
-                 NVIC_INT_CTRL_R = 0x10000000;
+                 NVIC_INT_CTRL_R |= 0x10000000;
              }
              if(tcb[taskCurrent].state == STATE_BLOCKED && pi == true)
              {
@@ -445,6 +449,7 @@ void svCallIsr()
          }
          tcb[i].state = STATE_INVALID;
          tcb[i].pid = 0;
+         taskCount--;
          break;
      }
      __asm(" mov lr,#0xFF000000");
@@ -714,12 +719,13 @@ int main(void)
     // Add required idle processes at lowest priority // Order was changed
     ok =  createThread(idle, "Idle", 7);
     // Add other processes
-     ok &= createThread(lengthyFn, "LengthyFn", 4);
+    ok &= createThread(lengthyFn, "LengthyFn", 4);
      ok &= createThread(flash4Hz, "Flash4Hz", 0);
      ok &= createThread(oneshot, "OneShot", -4);
      ok &= createThread(readKeys, "ReadKeys", 4);
      ok &= createThread(debounce, "Debounce", 4);
      ok &= createThread(important, "Important", -8);
+
      ok &= createThread(uncooperative, "Uncoop", 2);
      //ok &= createThread(shell, "Shell", 0);
 
