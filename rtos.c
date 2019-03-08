@@ -37,9 +37,12 @@
 //-----------------------------------------------------------------------------
 
 #include <stdint.h>
+#include <stdio.h>
 #include <stdbool.h>
 #include "tm4c123gh6pm.h"
 #include <string.h>
+#include <strings.h>
+#include <ctype.h>
 // REQUIRED: correct these bit-banding references for the off-board LEDs
 #define BLUE_LED     (*((volatile uint32_t *)(0x42000000 + (0x400253FC-0x40000000)*32 + 2*4))) // on-board blue LED
 #define RED_LED      (*((volatile uint32_t *)(0x42000000 + (0x400243FC-0x40000000)*32 + 1*4))) // off-board red LED
@@ -54,7 +57,7 @@
 // function pointer
 typedef void (*_fn)();
 
-
+extern void ResetISR();
 // semaphore
 #define MAX_SEMAPHORES 5
 #define MAX_QUEUE_SIZE 5
@@ -76,15 +79,19 @@ struct semaphore *keyPressed, *keyReleased, *flashReq, *resource;
 #define STATE_READY      2 // has run, can resume at any time
 #define STATE_DELAYED    3 // has run, but now awaiting timer
 #define STATE_BLOCKED    4 // has run, but now blocked by semaphore
-
+#define MAX_Args 5
 #define MAX_TASKS 10       // maximum number of valid tasks
 uint8_t taskCurrent = 0;   // index of last dispatched task
 uint8_t taskCount = 0;     // total number of valid tasks
 uint32_t stack[MAX_TASKS][256];  // 1024 byte stack for each thread
 uint8_t svc_number;
-bool schedule = true;
-bool pi = false;
-bool rtos = false;
+uint8_t argc;     // Argument count and general purpose variables.
+uint8_t pos[MAX_Args];  // Position of arguments in input buffer.
+char type [MAX_Args];
+char* commands[8] = {"pi","schedule","rtos","reboot","pid","kill","ipcs","ps"}; // Currently available commands.
+bool schedule;
+bool pi;
+bool rtos;
 void *a;
 void *sp_system;
 #define svc_yield 1
@@ -92,6 +99,66 @@ void *sp_system;
 #define svc_wait  3
 #define svc_post 4
 #define svc_delete 5
+
+//Escape sequences for text-color
+
+#define black "\033[22;30m"
+#define red "\033[22;31m"
+#define green "\033[22;32m"
+#define blue "\033[22;34m"
+#define gray "\033[22;37m"
+#define yellow "\033[01;33m"
+#define white "\033[01;37m"
+
+//Escape sequences for background-color
+
+#define bgblack "\033[22;40m"
+#define bgred "\033[22;41m"
+#define bggreen "\033[22;42m"
+#define bgblue "\033[22;44m"
+#define bggray "\033[22;47m"
+#define bgyellow "\033[01;43m"
+#define bgwhite "\033[01;47m"
+
+//Resets the color settings
+
+#define Color_end "\033[0m"
+
+//Clear terminal
+
+#define clear0 "\033[0;J"
+#define clear1 "\033[1;J"
+#define clear2 "\033[2;J"
+#define clearline "\033[1;K"
+
+//Cursor Navigation sequences
+
+
+#define up "\033[1;A"
+#define down "\033[1;B"
+#define left "\033[1;D"
+#define maxleft "\033[100;D"
+#define right "\033[1;C"
+
+//Saved cursor positions
+
+#define topleft "\033[1;1H"
+#define topright "\033[1;100H"
+#define frstcomm "\033[3;3H"
+
+//Report Cursor
+
+#define rep "\033[6n"
+
+#define Buffer_Max 80
+
+char str[20];
+char input[Buffer_Max];
+char scrollbuffer[4][Buffer_Max];
+uint8_t l = 0;// Scroll-back write pointer
+uint8_t ctr = 1;
+int8_t m = 0; // Scroll-back read pointer
+const char *arr_buffer[] = {"[a","[b","[c","[d"};
 
 struct _tcb
 {
@@ -138,25 +205,21 @@ int rtosScheduler()
         if (task >= MAX_TASKS)
             task = 0;
         ok = (tcb[task].state == STATE_READY || tcb[task].state == STATE_UNRUN);
-        if(ok && schedule == false)
+        if(tcb[task].state == STATE_UNRUN)
             break;
-        else if(ok && schedule == true)
+        if(schedule)
         {
-            if(tcb[task].state == STATE_UNRUN)
-                break;
+            if(tcb[task].skip_count == 0)
+            {
+                tcb[task].skip_count = tcb[task].currentPriority + 8;
+                ok &= true;
+            }
             else
             {
-                if(tcb[task].skip_count > 0)
-                {
-                    tcb[task].skip_count--;
-                    ok &= false;
-                }
-                else
-                    tcb[task].skip_count = tcb[task].currentPriority + 8;
-             }
+                tcb[task].skip_count--;
+                ok &= false;
+            }
         }
-        else
-            continue;
     }
     return task;
 }
@@ -530,6 +593,263 @@ uint8_t readPbs()
 }
 
 //-----------------------------------------------------------------------------
+// UART subroutines
+//-----------------------------------------------------------------------------
+
+// Blocking function that writes a serial character when the UART buffer is not full
+void putcUart0(char c)
+{
+    while ((UART0_FR_R & UART_FR_TXFF)!=0)
+    {
+        yield();
+    }
+    UART0_DR_R = c;
+}
+
+// Blocking function that writes a string when the UART buffer is not full
+void putsUart0(char* str)
+{
+    uint8_t i;
+    for (i = 0; i < strlen(str); i++)
+      putcUart0(str[i]);
+}
+
+// Blocking function that returns with serial data once the buffer is not empty
+char getcUart0()
+{
+    while ((UART0_FR_R & UART_FR_RXFE)!=0)  //Blocking but can yield while it's blocking
+    {
+        yield();
+    }
+    return UART0_DR_R & 0xFF;
+}
+
+/*void scrollback()  //FIFO format
+{
+if(ctr<=l)
+{
+m = l-ctr;
+strcpy(input,scrollbuffer[m]);
+}
+else
+{
+strcpy(input,scrollbuffer[l-1]);
+ctr = 1;
+}
+}
+*/
+void getsUart0()
+{
+     uint8_t c;
+     uint8_t count = 0;
+l1:  c = getcUart0();
+     putcUart0(c);
+     if ((c == 0x8) & (count == 0))  // Checking for backspace and if it is the first entry.
+         goto l1;
+     else if ((c == 0x8) & (count > 0))
+        {
+         count --;
+         goto l1;
+        }
+     else
+     {
+         if(c == 0x0D) //  Enter indicates end of command entry.
+         {
+          input[count] = '\0';
+          if(l>4)
+              l = 0;
+          //strcpy(scrollbuffer[l],input);
+          l++;
+          return;
+         }
+         else
+         {
+            if(c < 0x20)  // Check for printable characters.
+                goto l1;
+            else
+               {
+                input[count++] = c; // All entries to the input buffer are converted to lower-case
+
+
+                    if(strstr(input,arr_buffer[0])!=NULL)
+                    {  if(l!=0)
+                       {
+                        //scrollback();
+                        ctr++;
+                        return;
+                       }
+                       else
+                       {
+                           count--;
+                           goto l1;
+                       }
+                     }
+
+                if (count > Buffer_Max)     // Checking if buffer is full.
+                {
+                    putsUart0("\nStop!Buffer has overflowed!Try again\r\n\r\n");
+                    waitMicrosecond(1000);
+                    return;
+                }
+                else
+                    goto l1;
+               }
+         }
+     }
+}
+
+void pidThread()
+{
+    uint8_t r;
+    bool c = 0;
+    for(r = 0 ; r < MAX_TASKS ; r++)
+    {
+        if(strcasecmp(&input[pos[1]],tcb[r].name)==0)
+        {
+        c = 1;
+        break;
+        }
+    }
+    if(c)
+    {
+    snprintf(str,sizeof str,"%d%s%d%d%d%d%p",0,"x",0,0,0,0,tcb[r].pid);
+    putsUart0(str);
+    }
+    else
+        putsUart0("Thread doesn't exist");
+}
+void moveCursor(uint8_t i , uint8_t j)
+{
+    char l[20];
+    snprintf(l, sizeof l, "%s%d%s%d%s","\033[",i,";",j,"H");
+    putsUart0(l);
+
+}
+
+void parseInput()
+{
+uint8_t j = 0;
+uint8_t k = 0;
+uint8_t i = 0;
+uint8_t len = strlen(input);
+if(isspace(input[0]) | (ispunct(input[0]))) // Checking for space or punctuation in first entry
+    input[0] = '\0'; // Replacing all delimiters to null.
+else if(isalpha(input[0])) // Check for alphabets
+{
+    argc++;                  // Update argc , pos and type.
+    pos[j++] = 0;
+    type[k++] = 'a';
+}
+else
+{
+    argc++;
+    pos[j++] = 0;
+    type[k++] = 'n';
+}
+
+for(i=1;i<len;i++)     // Loop to parse the entries after the first entry.
+{
+if(isspace(input[i]) || (ispunct(input[i])))
+{
+    input[i] = '\0';
+if(isalpha(input[i+1]))
+{   argc++;
+    pos[j++] = i+1;
+    type[k++] = 'a';
+}
+else if(isdigit(input[i+1]))
+{
+    argc++;
+    pos[j++] = i+1;
+    type[k++] = 'n';
+}
+else
+    continue;
+}
+}
+}
+
+int isCommand()
+{
+    uint8_t i;
+    for(i=0;i<8;i++)
+    {
+    if(strcasecmp(&input[pos[0]],commands[i])==0) // Change it to strncasecmp
+    {
+        switch(i+1)
+        {
+        case 1:
+            if(strcasecmp(&input[pos[1]],"on")==0)
+            {
+                pi = 1;
+                return 0;
+             }
+            else if(strcasecmp(&input[pos[1]],"off")==0)
+            {
+                pi = 0;
+                return 0;
+            }
+            else
+                putsUart0("Invalid argument for priority inheritance");
+            break;
+        case 2:
+            if(strcasecmp(&input[pos[1]],"on")==0)
+            {
+                schedule = 1;
+                return 0;
+            }
+            else if(strcasecmp(&input[pos[1]],"off")==0)
+            {
+                 schedule = 0;
+                 return 0;
+            }
+            else
+                 putsUart0("Invalid argument for priority scheduling");
+            break;
+        case 3:
+            if(strcasecmp(&input[pos[1]],"on")==0)
+            {
+                rtos = 1;
+                return 0;
+            }
+            else if(strcasecmp(&input[pos[1]],"off")==0)
+            {
+                rtos = 0;
+                ResetISR();
+            }
+            else
+                putsUart0("Invalid argument for preemption");
+            break;
+        case 4:
+            ResetISR();
+            break;
+        case 5:
+            pidThread();
+            break;
+        /*case 6:
+            if(argc-1>= Min_Args[2]) // Checking if minimum argument criteria is met.
+                return 'L';          // Inductance
+            else
+                break;
+        case 7:
+            if(argc-1>= Min_Args[2]) // Checking if minimum argument criteria is met.
+                return 'E';          // ESR
+            else
+                break;
+        case 8:
+            if(argc-1>= Min_Args[2]) // Checking if minimum argument criteria is met.
+                return 'A';          // Auto
+            else
+                break;
+                */
+        default:
+            putsUart0("Invalid Command!\r\n\r\n"); // Operation not supported by program
+        }
+     }
+    }
+    return 1;
+}
+//-----------------------------------------------------------------------------
 // YOUR UNIQUE CODE
 // REQUIRED: add any custom code in this space
 //-----------------------------------------------------------------------------
@@ -685,11 +1005,20 @@ void kill(_fn fn)
 }
 void shell()
 {
-    //while (true)
-    //{
+    putsUart0(clear1);
+    moveCursor(1,1);
+    while (true)
+    {
+        argc = 0;
+        putsUart0("Enter something!!\r\n\n"); // Create menu
+        getsUart0();
+        //putsUart0(clearline);
+        parseInput();
+        putsUart0("\r\n");
+        isCommand();
+        putsUart0("\r\n");
         // REQUIRED: add processing for the shell commands through the UART here
-
-    //}
+    }
 }
 
 //-----------------------------------------------------------------------------
@@ -698,7 +1027,6 @@ void shell()
 int main(void)
 {
     bool ok;
-
     // Initialize hardware
     initHw();
     rtosInit();
@@ -717,17 +1045,18 @@ int main(void)
 
 
     // Add required idle processes at lowest priority // Order was changed
-    ok =  createThread(idle, "Idle", 7);
+     ok =  createThread(idle, "Idle", 7);
     // Add other processes
-    ok &= createThread(lengthyFn, "LengthyFn", 4);
+     ok &= createThread(lengthyFn, "Lengthyfn", 4);
      ok &= createThread(flash4Hz, "Flash4Hz", 0);
-     ok &= createThread(oneshot, "OneShot", -4);
-     ok &= createThread(readKeys, "ReadKeys", 4);
+     ok &= createThread(oneshot, "Oneshot", -4);
+     ok &= createThread(readKeys, "Readkeys", 4);
      ok &= createThread(debounce, "Debounce", 4);
      ok &= createThread(important, "Important", -8);
 
+
      ok &= createThread(uncooperative, "Uncoop", 2);
-     //ok &= createThread(shell, "Shell", 0);
+     ok &= createThread(shell, "Shell", 0);
 
     // Start up RTOS
     if (ok)
