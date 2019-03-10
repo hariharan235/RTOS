@@ -67,6 +67,7 @@ struct semaphore
     uint16_t queueSize;
     uint32_t processQueue[MAX_QUEUE_SIZE]; // store task index here
     uint16_t currentUser;
+    char sname[16];
 } semaphores[MAX_SEMAPHORES];
 uint8_t semaphoreCount = 0;
 
@@ -79,7 +80,7 @@ struct semaphore *keyPressed, *keyReleased, *flashReq, *resource;
 #define STATE_READY      2 // has run, can resume at any time
 #define STATE_DELAYED    3 // has run, but now awaiting timer
 #define STATE_BLOCKED    4 // has run, but now blocked by semaphore
-#define MAX_Args 5
+#define MAX_Args 3
 #define MAX_TASKS 10       // maximum number of valid tasks
 uint8_t taskCurrent = 0;   // index of last dispatched task
 uint8_t taskCount = 0;     // total number of valid tasks
@@ -137,7 +138,6 @@ void *sp_system;
 #define up "\033[1;A"
 #define down "\033[1;B"
 #define left "\033[1;D"
-#define maxleft "\033[100;D"
 #define right "\033[1;C"
 
 //Saved cursor positions
@@ -292,14 +292,15 @@ void setThreadPriority(_fn fn, uint8_t priority)
     tcb[k].priority = priority;
     tcb[k].currentPriority = priority;
 }
-struct semaphore* createSemaphore(uint8_t count)
+struct semaphore* createSemaphore(uint8_t count,char nam[])
 {
     struct semaphore *pSemaphore = 0;
     if (semaphoreCount < MAX_SEMAPHORES)
     {
         pSemaphore = &semaphores[semaphoreCount++];
         pSemaphore->count = count;
-
+        strncpy(pSemaphore->sname,nam, sizeof(pSemaphore->sname)-1);
+        pSemaphore->sname[sizeof(pSemaphore->sname) - 1] = '\0';
     }
     return pSemaphore;
 }
@@ -439,7 +440,7 @@ void svCallIsr()
      case svc_wait:
           temp = (&semaphores);
           arg1 = arg1 - (uint32_t)temp;
-          arg1 = arg1 / 28;
+          arg1 = arg1 / 41;  //Change here
           if(semaphores[arg1].count > 0)
           {
              semaphores[arg1].count--;
@@ -448,14 +449,14 @@ void svCallIsr()
           }
           else
           {
-             if(semaphores[arg1].processQueue[(semaphores[arg1].queueSize)-1] != taskCurrent) // Improve this.
-             {
+             //if(semaphores[arg1].processQueue[(semaphores[arg1].queueSize)-1] != taskCurrent) // Improve this.
+             //{
                  semaphores[arg1].processQueue[semaphores[arg1].queueSize] = taskCurrent;
                  tcb[taskCurrent].state = STATE_BLOCKED;
                  tcb[taskCurrent].semaphore = (void *)arg1;
                  semaphores[arg1].queueSize++;
                  NVIC_INT_CTRL_R |= 0x10000000;
-             }
+             //}
              if(tcb[taskCurrent].state == STATE_BLOCKED && pi == true)
              {
                  if(tcb[semaphores[arg1].currentUser].priority > tcb[taskCurrent].priority)
@@ -470,7 +471,7 @@ void svCallIsr()
      case svc_post:
               temp = (&semaphores);
               arg1 = arg1 - (uint32_t)temp;
-              arg1 = arg1 / 28;
+              arg1 = arg1 / 41;  //Change here
               semaphores[arg1].count++;
               tcb[taskCurrent].currentPriority = tcb[taskCurrent].priority;
               if(semaphores[arg1].count == 1)
@@ -490,7 +491,7 @@ void svCallIsr()
               }
               break;
      case svc_delete:
-         for(i = 1 ; i < MAX_TASKS ; i++ )
+         for(i = 0 ; i < MAX_TASKS ; i++ )
          {
              if(tcb[i].pid == (void *)arg1)
                  break;
@@ -536,29 +537,29 @@ void initHw()
                SYSCTL_GPIOHBCTL_R = 0;
 
             // Enable GPIO port F peripherals
-               SYSCTL_RCGC2_R = SYSCTL_RCGC2_GPIOF|SYSCTL_RCGC2_GPIOE|SYSCTL_RCGC2_GPIOA;
+               SYSCTL_RCGC2_R |= SYSCTL_RCGC2_GPIOF|SYSCTL_RCGC2_GPIOE|SYSCTL_RCGC2_GPIOA;
 
             // Configure LEDs
 
-               GPIO_PORTF_DIR_R = 0x04;
-               GPIO_PORTF_DR2R_R = 0x04; // set drive strength to 2mA (not needed since default configuration -- for clarity)
-               GPIO_PORTF_DEN_R = 0x04;
+               GPIO_PORTF_DIR_R |= 0x04;
+               GPIO_PORTF_DR2R_R |= 0x04; // set drive strength to 2mA (not needed since default configuration -- for clarity)
+               GPIO_PORTF_DEN_R |= 0x04;
 
-               GPIO_PORTE_DIR_R = 0x1E;
-               GPIO_PORTE_DR2R_R = 0x1E;
-               GPIO_PORTE_DEN_R = 0x1E;
+               GPIO_PORTE_DIR_R |= 0x1E;
+               GPIO_PORTE_DR2R_R |= 0x1E;
+               GPIO_PORTE_DEN_R |= 0x1E;
 
             // Configure PBs
 
-               GPIO_PORTA_DEN_R = 0x7C;
-               GPIO_PORTA_PUR_R = 0x7C;
+               GPIO_PORTA_DEN_R |= 0x7C;
+               GPIO_PORTA_PUR_R |= 0x7C;
 
             // Configure UART0 pins
 
                SYSCTL_RCGCUART_R |= SYSCTL_RCGCUART_R0;         // turn-on UART0, leave other uarts in same status
                GPIO_PORTA_DEN_R |= 3;                           // default, added for clarity
                GPIO_PORTA_AFSEL_R |= 3;                         // default, added for clarity
-               GPIO_PORTA_PCTL_R = GPIO_PCTL_PA1_U0TX | GPIO_PCTL_PA0_U0RX;
+               GPIO_PORTA_PCTL_R |= GPIO_PCTL_PA1_U0TX | GPIO_PCTL_PA0_U0RX;
 
             // Configure UART0 to 115200 baud, 8N1 format (must be 3 clocks from clock enable and config writes)
 
@@ -698,6 +699,36 @@ l1:  c = getcUart0();
      }
 }
 
+void kill()
+{
+    uint8_t i;
+    bool c = 0;
+    _fn fn;
+    for(i = 0;i<taskCount;i++)
+    {
+        if(strcasecmp(&input[pos[1]],tcb[i].name)==0)
+        {
+            c = 1;
+            break;
+        }
+
+    }
+    if(c == 1 && tcb[i].pid!=0)
+    {
+    fn = (_fn)tcb[i].pid;
+    destroyThread(fn);
+    }
+    else
+        putsUart0("Task doesn't exist");
+}
+
+void moveCursor(uint8_t i , uint8_t j)
+{
+    char l[20];
+    snprintf(l, sizeof l, "%s%d%s%d%s","\033[",i,";",j,"H");
+    putsUart0(l);
+
+}
 void pidThread()
 {
     uint8_t r;
@@ -718,13 +749,40 @@ void pidThread()
     else
         putsUart0("Thread doesn't exist");
 }
-void moveCursor(uint8_t i , uint8_t j)
-{
-    char l[20];
-    snprintf(l, sizeof l, "%s%d%s%d%s","\033[",i,";",j,"H");
-    putsUart0(l);
 
+void ipcs()
+{
+//moveCursor(1,1);
+//putsUart0(clear0);
+putsUart0("    Name     | Count |    User    |    Waiting-Task   \r\n");
+putsUart0("-------------|-------|------------|-------------------\r\n");
+uint8_t i;
+for( i = 0 ; i < MAX_SEMAPHORES-1 ; i++)
+{
+    putsUart0(semaphores[i].sname);
+    putsUart0(" \t");
+    snprintf(str,sizeof str,"%d",semaphores[i].count);
+    putsUart0(str);
+    putsUart0(" \t");
+    if(semaphores[i].currentUser == 0)
+        putsUart0(" None \t\t");
+    else
+    {
+        putsUart0(tcb[semaphores[i].currentUser].name);
+        putsUart0(" \t");
+    }
+    if(semaphores[i].processQueue[0] == 0)
+        putsUart0(" None \t");
+    else
+    {
+        putsUart0(tcb[semaphores[i].processQueue[0]].name);
+        putsUart0(" \t");
+    }
+    putsUart0("\r\n");
 }
+}
+
+
 
 void parseInput()
 {
@@ -826,17 +884,13 @@ int isCommand()
         case 5:
             pidThread();
             break;
-        /*case 6:
-            if(argc-1>= Min_Args[2]) // Checking if minimum argument criteria is met.
-                return 'L';          // Inductance
-            else
-                break;
+        case 6:
+            kill();
+            break;
         case 7:
-            if(argc-1>= Min_Args[2]) // Checking if minimum argument criteria is met.
-                return 'E';          // ESR
-            else
-                break;
-        case 8:
+            ipcs();
+            break;
+        /*case 8:
             if(argc-1>= Min_Args[2]) // Checking if minimum argument criteria is met.
                 return 'A';          // Auto
             else
@@ -997,12 +1051,6 @@ void important()
     }
 }
 
-void kill(_fn fn)
-{
-    //Print available threads
-    // What if thread doesn't exist?
-    destroyThread(fn);
-}
 void shell()
 {
     putsUart0(clear1);
@@ -1038,10 +1086,10 @@ int main(void)
     waitMicrosecond(250000);
 
     // Initialize semaphores
-    keyPressed = createSemaphore(1);
-    keyReleased = createSemaphore(0);
-    flashReq = createSemaphore(5);
-    resource = createSemaphore(1);
+    keyPressed = createSemaphore(1,"keyPressed");
+    keyReleased = createSemaphore(0,"keyReleased");
+    flashReq = createSemaphore(5,"flashReq");
+    resource = createSemaphore(1,"resource");
 
 
     // Add required idle processes at lowest priority // Order was changed
