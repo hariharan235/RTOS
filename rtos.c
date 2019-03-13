@@ -88,10 +88,10 @@ uint32_t stack[MAX_TASKS][256];  // 1024 byte stack for each thread
 uint8_t svc_number;
 uint8_t argc;     // Argument count and general purpose variables.
 uint8_t pos[MAX_Args];  // Position of arguments in input buffer.
-char type [MAX_Args];
 char* commands[8] = {"pi","schedule","rtos","reboot","pid","kill","ipcs","ps"}; // Currently available commands.
 bool schedule;
 bool pi;
+uint32_t sum = 0;
 bool rtos;
 void *a;
 void *sp_system;
@@ -152,13 +152,8 @@ void *sp_system;
 
 #define Buffer_Max 80
 
-char str[20];
+char str[10];
 char input[Buffer_Max];
-char scrollbuffer[4][Buffer_Max];
-uint8_t l = 0;// Scroll-back write pointer
-uint8_t ctr = 1;
-int8_t m = 0; // Scroll-back read pointer
-const char *arr_buffer[] = {"[a","[b","[c","[d"};
 
 struct _tcb
 {
@@ -169,6 +164,8 @@ struct _tcb
     uint16_t skip_count;           // For priority scheduling
     int8_t currentPriority;        // used for priority inheritance
     uint32_t ticks;                // ticks until sleep complete
+    uint32_t instime;
+    uint32_t iirtime;
     char name[16];                 // name of task used in ps command
     void *semaphore;               // pointer to the semaphore that is blocking the thread
 } tcb[MAX_TASKS];
@@ -191,7 +188,16 @@ void rtosInit()
     // REQUIRED: initialize systick for 1ms system timer
     NVIC_ST_RELOAD_R |= 39999;     // 1 millisecond i.e  N = 40,000  clock pulses ...loading N-1 ; 1khz timer
     NVIC_ST_CURRENT_R |= 0x01; //  Any value will clear it + count bit in CTRL_R
+    SYSCTL_RCGCWTIMER_R |= SYSCTL_RCGCWTIMER_R5;
+    WTIMER5_CTL_R &= ~TIMER_CTL_TAEN;
+    WTIMER5_CFG_R = 4;
+    WTIMER5_TAMR_R = TIMER_TAMR_TAMR_PERIOD;
+    WTIMER5_TAILR_R = 0x02625A00;
+    WTIMER5_IMR_R = TIMER_IMR_TATOIM;
+    NVIC_EN3_R |= 1 << (INT_WTIMER5A-16-96);
+
 }
+
 
 // REQUIRED: Implement prioritization to 8 levels
 int rtosScheduler()
@@ -233,7 +239,9 @@ void rtosStart()
     tcb[taskCurrent].state = STATE_READY;
     __set_MSP((uint32_t)tcb[taskCurrent].sp);
     fn = (_fn)tcb[taskCurrent].pid;
-    NVIC_ST_CTRL_R  |= 0x07;  //   System clock + with interrupt + Multi-shot mode.
+    tcb[taskCurrent].instime++;
+    NVIC_ST_CTRL_R  |= 0x07;
+    WTIMER5_CTL_R |= TIMER_CTL_TAEN;                 // turn-on counter        // turn-on interrupt 120 (WTIMER5A)//   System clock + with interrupt + Multi-shot mode.
     (*fn)();
     // Add code to initialize the SP with tcb[task_current].sp;
 }
@@ -346,12 +354,10 @@ void post(struct semaphore *pSemaphore)
 // REQUIRED: in preemptive code, add code to request task switch
 void systickIsr()
 {
+if(rtos == true)
+    NVIC_INT_CTRL_R |= 0x10000000;
 uint16_t cnt = 0 ; // Since idle will never be delayed
-//2 bytes for 8 tasks.
-// Find all delayed tasks
-//Reduce the ticks of all delayed tasks
-
-for(cnt = 0 ; cnt < MAX_TASKS ; cnt++)     //For all tasks
+for(cnt = 0 ; cnt < taskCount ; cnt++)     //For all tasks
 {
      if(tcb[cnt].state == 3)
      {
@@ -363,8 +369,6 @@ for(cnt = 0 ; cnt < MAX_TASKS ; cnt++)     //For all tasks
          tcb[cnt].ticks--;
       }
 }
-if(rtos == true)
-    NVIC_INT_CTRL_R |= 0x10000000;
 }
 
 
@@ -377,7 +381,6 @@ __asm(" PUSH {r4-r11}");
 tcb[taskCurrent].sp = (void *)__get_MSP();
 taskCurrent = rtosScheduler();
 __set_MSP((uint32_t)sp_system);
-
 if(tcb[taskCurrent].state == 2)
 {
 __set_MSP((uint32_t)tcb[taskCurrent].sp);
@@ -402,9 +405,8 @@ __asm(" orr r0,#0x00000200");
 __asm(" STR r0,[sp]");
 __set_MSP(((uint32_t)tcb[taskCurrent].sp - 8));
 __asm(" SUB sp,#0x24");
-
 }
-
+tcb[taskCurrent].instime++;
 __asm(" mov lr,#0xFF000000");
 __asm(" orr lr,lr,#0x00FF0000");
 __asm(" orr lr,lr,#0x0000FF00");
@@ -425,8 +427,6 @@ void svCallIsr()
       svc_number = (uint32_t)getr0();
      __asm(" LDR r0,[sp,#0x24]");
       arg1 = (uint32_t)getr0();
-     //__asm(" LDR r0,[sp,#0x48]");
-     //  arg2 = (uint32_t)getr0();
      switch(svc_number)
      {
      case svc_yield:
@@ -449,23 +449,22 @@ void svCallIsr()
           }
           else
           {
-             //if(semaphores[arg1].processQueue[(semaphores[arg1].queueSize)-1] != taskCurrent) // Improve this.
-             //{
+
+
                  semaphores[arg1].processQueue[semaphores[arg1].queueSize] = taskCurrent;
                  tcb[taskCurrent].state = STATE_BLOCKED;
                  tcb[taskCurrent].semaphore = (void *)arg1;
                  semaphores[arg1].queueSize++;
-                 NVIC_INT_CTRL_R |= 0x10000000;
-             //}
-             if(tcb[taskCurrent].state == STATE_BLOCKED && pi == true)
+
+             if( pi == true)
              {
-                 if(tcb[semaphores[arg1].currentUser].priority > tcb[taskCurrent].priority)
+                 if((tcb[semaphores[arg1].currentUser].priority > tcb[taskCurrent].priority) && semaphores[arg1].currentUser!=0)
                  {
                      tcb[semaphores[arg1].currentUser].currentPriority = MIN(tcb[semaphores[arg1].currentUser].priority,tcb[taskCurrent].priority);
 
                  }
              }
-
+             NVIC_INT_CTRL_R |= 0x10000000;
           }
            break;
      case svc_post:
@@ -523,6 +522,33 @@ void svCallIsr()
      __asm(" BX LR");
 }
 
+void wideTimer5Isr()
+{
+static bool firstUpdate = true;
+float alpha = 0.8; //Scaled
+uint8_t b;
+sum = 0;
+if (firstUpdate)
+{
+    for(b = 0 ; b < taskCount ; b++)
+    {
+       tcb[b].iirtime = tcb[b].instime;
+       sum += tcb[b].iirtime;
+       tcb[b].instime = 0;// Let initial value be first sample
+    }
+firstUpdate = false;
+}
+else
+{
+    for(b = 0 ; b < taskCount ; b++)
+    {
+        tcb[b].iirtime = (uint32_t)(tcb[b].iirtime * alpha + tcb[b].instime * (1-alpha));
+        sum += tcb[b].iirtime;
+        tcb[b].instime = 0;
+    }
+}
+WTIMER5_ICR_R |= TIMER_ICR_TATOCINT;
+}
 //-----------------------------------------------------------------------------
 // Subroutines
 //-----------------------------------------------------------------------------
@@ -625,20 +651,7 @@ char getcUart0()
     return UART0_DR_R & 0xFF;
 }
 
-/*void scrollback()  //FIFO format
-{
-if(ctr<=l)
-{
-m = l-ctr;
-strcpy(input,scrollbuffer[m]);
-}
-else
-{
-strcpy(input,scrollbuffer[l-1]);
-ctr = 1;
-}
-}
-*/
+
 void getsUart0()
 {
      uint8_t c;
@@ -657,10 +670,6 @@ l1:  c = getcUart0();
          if(c == 0x0D) //  Enter indicates end of command entry.
          {
           input[count] = '\0';
-          if(l>4)
-              l = 0;
-          //strcpy(scrollbuffer[l],input);
-          l++;
           return;
          }
          else
@@ -669,23 +678,7 @@ l1:  c = getcUart0();
                 goto l1;
             else
                {
-                input[count++] = c; // All entries to the input buffer are converted to lower-case
-
-
-                    if(strstr(input,arr_buffer[0])!=NULL)
-                    {  if(l!=0)
-                       {
-                        //scrollback();
-                        ctr++;
-                        return;
-                       }
-                       else
-                       {
-                           count--;
-                           goto l1;
-                       }
-                     }
-
+                input[count++] = c;
                 if (count > Buffer_Max)     // Checking if buffer is full.
                 {
                     putsUart0("\nStop!Buffer has overflowed!Try again\r\n\r\n");
@@ -722,6 +715,7 @@ void kill()
         putsUart0("Task doesn't exist");
 }
 
+
 void moveCursor(uint8_t i , uint8_t j)
 {
     char l[20];
@@ -743,7 +737,7 @@ void pidThread()
     }
     if(c)
     {
-    snprintf(str,sizeof str,"%d%s%d%d%d%d%p",0,"x",0,0,0,0,tcb[r].pid);
+    snprintf(str,sizeof str,"%p",tcb[r].pid);
     putsUart0(str);
     }
     else
@@ -752,8 +746,6 @@ void pidThread()
 
 void ipcs()
 {
-//moveCursor(1,1);
-//putsUart0(clear0);
 putsUart0("    Name     | Count |    User    |    Waiting-Task   \r\n");
 putsUart0("-------------|-------|------------|-------------------\r\n");
 uint8_t i;
@@ -782,12 +774,36 @@ for( i = 0 ; i < MAX_SEMAPHORES-1 ; i++)
 }
 }
 
+void ps()
+{
+   uint32_t cpu = 0;
+   putsUart0("    Name     |     PID     |    Priority    |    %CPU      \r\n");
+   putsUart0("-------------|-------------|----------------|--------------\r\n");
+   uint8_t i = 0;
+   for(i = 0 ; i < taskCount ; i++)
+   {
+       putsUart0(tcb[i].name);
+       putsUart0("     \t");
+       snprintf(str,sizeof str,"%p",tcb[i].pid);
+       putsUart0(str);
+       putsUart0("    \t   ");
+       snprintf(str,sizeof str,"%d",tcb[i].priority);
+       putsUart0(str);
+       putsUart0("    \t");
+       cpu = (tcb[i].iirtime*1000) / sum ;
+       snprintf(str,sizeof str,"%d.%.2d", cpu / 10, cpu % 10);
+       putsUart0(str);
+       putsUart0(" \r\n");
+   }
+
+
+
+}
 
 
 void parseInput()
 {
 uint8_t j = 0;
-uint8_t k = 0;
 uint8_t i = 0;
 uint8_t len = strlen(input);
 if(isspace(input[0]) | (ispunct(input[0]))) // Checking for space or punctuation in first entry
@@ -796,13 +812,13 @@ else if(isalpha(input[0])) // Check for alphabets
 {
     argc++;                  // Update argc , pos and type.
     pos[j++] = 0;
-    type[k++] = 'a';
+
 }
 else
 {
     argc++;
     pos[j++] = 0;
-    type[k++] = 'n';
+
 }
 
 for(i=1;i<len;i++)     // Loop to parse the entries after the first entry.
@@ -813,13 +829,13 @@ if(isspace(input[i]) || (ispunct(input[i])))
 if(isalpha(input[i+1]))
 {   argc++;
     pos[j++] = i+1;
-    type[k++] = 'a';
+
 }
 else if(isdigit(input[i+1]))
 {
     argc++;
     pos[j++] = i+1;
-    type[k++] = 'n';
+
 }
 else
     continue;
@@ -890,12 +906,9 @@ int isCommand()
         case 7:
             ipcs();
             break;
-        /*case 8:
-            if(argc-1>= Min_Args[2]) // Checking if minimum argument criteria is met.
-                return 'A';          // Auto
-            else
-                break;
-                */
+        case 8:
+            ps();
+            break;
         default:
             putsUart0("Invalid Command!\r\n\r\n"); // Operation not supported by program
         }
