@@ -35,7 +35,7 @@
 //-----------------------------------------------------------------------------
 // Device includes, defines, and assembler directives
 //-----------------------------------------------------------------------------
-
+extern void ResetISR();
 #include <stdint.h>
 #include <stdio.h>
 #include <stdbool.h>
@@ -43,7 +43,11 @@
 #include <string.h>
 #include <strings.h>
 #include <ctype.h>
+
+#define MIN(x, y) (((x) < (y)) ? (x) : (y)) // Min of two priorities, used in priority inheritance
+
 // REQUIRED: correct these bit-banding references for the off-board LEDs
+
 #define BLUE_LED     (*((volatile uint32_t *)(0x42000000 + (0x400253FC-0x40000000)*32 + 2*4))) // on-board blue LED
 #define RED_LED      (*((volatile uint32_t *)(0x42000000 + (0x400243FC-0x40000000)*32 + 1*4))) // off-board red LED
 #define GREEN_LED    (*((volatile uint32_t *)(0x42000000 + (0x400243FC-0x40000000)*32 + 2*4))) // off-board green LED
@@ -57,7 +61,6 @@
 // function pointer
 typedef void (*_fn)();
 
-extern void ResetISR();
 // semaphore
 #define MAX_SEMAPHORES 5
 #define MAX_QUEUE_SIZE 5
@@ -73,7 +76,7 @@ uint8_t semaphoreCount = 0;
 
 struct semaphore *keyPressed, *keyReleased, *flashReq, *resource;
 
-#define MIN(x, y) (((x) < (y)) ? (x) : (y))
+
 // task
 #define STATE_INVALID    0 // no task
 #define STATE_UNRUN      1 // task has never been run
@@ -85,21 +88,32 @@ struct semaphore *keyPressed, *keyReleased, *flashReq, *resource;
 uint8_t taskCurrent = 0;   // index of last dispatched task
 uint8_t taskCount = 0;     // total number of valid tasks
 uint32_t stack[MAX_TASKS][256];  // 1024 byte stack for each thread
-uint8_t svc_number;
-uint8_t argc;     // Argument count and general purpose variables.
-uint8_t pos[MAX_Args];  // Position of arguments in input buffer.
-char* commands[8] = {"pi","schedule","rtos","reboot","pid","kill","ipcs","ps"}; // Currently available commands.
-bool schedule;
-bool pi;
-uint32_t sum = 0;
-bool rtos;
-void *a;
-void *sp_system;
+uint32_t sum = 0;   //Sum of cpu-time of all running tasks
+
+//svc
 #define svc_yield 1
 #define svc_sleep 2
 #define svc_wait  3
 #define svc_post 4
 #define svc_delete 5
+uint8_t svc_number;
+
+//shell
+uint8_t argc;     // Argument count and general purpose variables.
+uint8_t pos[MAX_Args];  // Position of arguments in input buffer.
+char* commands[9] = {"pi","schedule","rtos","reboot","pidof","kill","ipcs","ps","start"}; // Currently available commands.
+#define Buffer_Max 80  //Max size of input buffer
+char str[20];
+char input[Buffer_Max];      //Shell input buffer
+
+//
+void *a;
+void *sp_system;
+
+//RTOS control bits
+bool schedule;
+bool pi;
+bool rtos;
 
 //Escape sequences for text-color
 
@@ -134,7 +148,6 @@ void *sp_system;
 
 //Cursor Navigation sequences
 
-
 #define up "\033[1;A"
 #define down "\033[1;B"
 #define left "\033[1;D"
@@ -150,22 +163,19 @@ void *sp_system;
 
 #define rep "\033[6n"
 
-#define Buffer_Max 80
-
-char str[10];
-char input[Buffer_Max];
 
 struct _tcb
 {
     uint8_t state;                 // see STATE_ values above
     void *pid;                     // used to uniquely identify thread
+    void *orig_pid;                // to identify task which got killed
     void *sp;                      // location of stack pointer for thread
     int8_t priority;               // -8=highest to 7=lowest
-    uint16_t skip_count;           // For priority scheduling
+    uint8_t skip_count;           // For priority scheduling
     int8_t currentPriority;        // used for priority inheritance
     uint32_t ticks;                // ticks until sleep complete
-    uint32_t instime;
-    uint32_t iirtime;
+    uint32_t instime;              // Current cpu-usage time
+    uint32_t iirtime;              // Averaged cpu-time
     char name[16];                 // name of task used in ps command
     void *semaphore;               // pointer to the semaphore that is blocking the thread
 } tcb[MAX_TASKS];
@@ -188,13 +198,16 @@ void rtosInit()
     // REQUIRED: initialize systick for 1ms system timer
     NVIC_ST_RELOAD_R |= 39999;     // 1 millisecond i.e  N = 40,000  clock pulses ...loading N-1 ; 1khz timer
     NVIC_ST_CURRENT_R |= 0x01; //  Any value will clear it + count bit in CTRL_R
-    SYSCTL_RCGCWTIMER_R |= SYSCTL_RCGCWTIMER_R5;
-    WTIMER5_CTL_R &= ~TIMER_CTL_TAEN;
-    WTIMER5_CFG_R = 4;
-    WTIMER5_TAMR_R = TIMER_TAMR_TAMR_PERIOD;
-    WTIMER5_TAILR_R = 0x02625A00;
-    WTIMER5_IMR_R = TIMER_IMR_TATOIM;
-    NVIC_EN3_R |= 1 << (INT_WTIMER5A-16-96);
+
+    //Initializing WideTimer 5 for 1Hz periodic interrupts to calculate cpu-usage
+
+    SYSCTL_RCGCWTIMER_R |= SYSCTL_RCGCWTIMER_R5;  //Turn on widetimer 5 in sysctrl block
+    WTIMER5_CTL_R &= ~TIMER_CTL_TAEN; // Disabe widetimer for configuration
+    WTIMER5_CFG_R = 4; // 32-bit mode
+    WTIMER5_TAMR_R = TIMER_TAMR_TAMR_PERIOD; //Periodic mode
+    WTIMER5_TAILR_R = 0x02625A00;  // 1 Hz timer.
+    WTIMER5_IMR_R = TIMER_IMR_TATOIM;  // Interrupt for time-out events
+    NVIC_EN3_R |= 1 << (INT_WTIMER5A-16-96); //Enable interrrupt in NVIC block
 
 }
 
@@ -211,13 +224,15 @@ int rtosScheduler()
         if (task >= MAX_TASKS)
             task = 0;
         ok = (tcb[task].state == STATE_READY || tcb[task].state == STATE_UNRUN);
-        if(tcb[task].state == STATE_UNRUN)
-            break;
+
+        // Priority Scheduler
         if(schedule)
         {
+            if(tcb[task].state == STATE_UNRUN)          //Let un-run tasks run once.
+                break;
             if(tcb[task].skip_count == 0)
             {
-                tcb[task].skip_count = tcb[task].currentPriority + 8;
+                tcb[task].skip_count = tcb[task].currentPriority + 8;  // Adding bias of 8 because Max priority is -8
                 ok &= true;
             }
             else
@@ -234,15 +249,15 @@ void rtosStart()
 {
     // REQUIRED: add code to call the first task to be run
     _fn fn;
-    sp_system = (void *)__get_MSP();
-    taskCurrent = rtosScheduler();
-    tcb[taskCurrent].state = STATE_READY;
-    __set_MSP((uint32_t)tcb[taskCurrent].sp);
-    fn = (_fn)tcb[taskCurrent].pid;
-    tcb[taskCurrent].instime++;
-    NVIC_ST_CTRL_R  |= 0x07;
-    WTIMER5_CTL_R |= TIMER_CTL_TAEN;                 // turn-on counter        // turn-on interrupt 120 (WTIMER5A)//   System clock + with interrupt + Multi-shot mode.
-    (*fn)();
+    sp_system = (void *)__get_MSP();          // Save system stack pointer
+    taskCurrent = rtosScheduler();            // Call scheduler
+    tcb[taskCurrent].state = STATE_READY;     // Mark task 0 as ready
+    __set_MSP((uint32_t)tcb[taskCurrent].sp); // Initialize sp with the sp of task 0
+    fn = (_fn)tcb[taskCurrent].pid;           // Initialize fn pointer with the pid of task 0
+    tcb[taskCurrent].instime++;               // Increment cputime of task 0
+    NVIC_ST_CTRL_R  |= 0x07;                  // Enable systick Isr
+    WTIMER5_CTL_R |= TIMER_CTL_TAEN;          // turn-on widetimer 5 counter
+    (*fn)();                                  // Call task 0
     // Add code to initialize the SP with tcb[task_current].sp;
 }
 
@@ -252,10 +267,10 @@ bool createThread(_fn fn, char name[], int priority)
     uint8_t i = 0;
     bool found = false;
     // REQUIRED: store the thread name
-    // add task if room in task list                 //Add name to task list if not full?
+    // add task if room in task list
     if (taskCount < MAX_TASKS)
     {
-        // make sure fn not already in list (prevent re-entrance)        // found = true if name already in list ?
+        // make sure fn not already in list (prevent re-entrance)
         while (!found && (i < MAX_TASKS))
         {
             found = (tcb[i++].pid ==  fn);
@@ -267,6 +282,7 @@ bool createThread(_fn fn, char name[], int priority)
             while (tcb[i].state != STATE_INVALID) {i++;}
             tcb[i].state = STATE_UNRUN;
             tcb[i].pid = fn;
+            tcb[i].orig_pid = fn;
             tcb[i].sp = &stack[i][255];
             tcb[i].priority = priority;
             tcb[i].currentPriority = priority;
@@ -288,11 +304,12 @@ void destroyThread(_fn fn)
 {
   __asm(" SVC #5");
 }
+
 // REQUIRED: modify this function to set a thread priority
 void setThreadPriority(_fn fn, uint8_t priority)
 {
-    uint16_t k;
-    for(k = 0; k < MAX_TASKS; k++)
+    uint8_t k;
+    for(k = 0; k < taskCount; k++)
     {
         if(tcb[k].pid == fn)
             break;
@@ -300,6 +317,7 @@ void setThreadPriority(_fn fn, uint8_t priority)
     tcb[k].priority = priority;
     tcb[k].currentPriority = priority;
 }
+
 struct semaphore* createSemaphore(uint8_t count,char nam[])
 {
     struct semaphore *pSemaphore = 0;
@@ -307,13 +325,14 @@ struct semaphore* createSemaphore(uint8_t count,char nam[])
     {
         pSemaphore = &semaphores[semaphoreCount++];
         pSemaphore->count = count;
-        strncpy(pSemaphore->sname,nam, sizeof(pSemaphore->sname)-1);
+        strncpy(pSemaphore->sname,nam, sizeof(pSemaphore->sname)-1); //Include name of semaphore in structure
         pSemaphore->sname[sizeof(pSemaphore->sname) - 1] = '\0';
     }
     return pSemaphore;
 }
 
-void* getr0(void)
+// Function to store value in r0 onto a C variable
+void* getr0(void)            // Produces a missing return statement warning but does not affect the RTOS.
 {
     __asm(" MOV r0,r0");
 }
@@ -355,18 +374,18 @@ void post(struct semaphore *pSemaphore)
 void systickIsr()
 {
 if(rtos == true)
-    NVIC_INT_CTRL_R |= 0x10000000;
-uint16_t cnt = 0 ; // Since idle will never be delayed
-for(cnt = 0 ; cnt < taskCount ; cnt++)     //For all tasks
+    NVIC_INT_CTRL_R |= 0x10000000;      // Request task switch every 1ms in preemption mode
+uint8_t cnt;
+for(cnt = 0 ; cnt < taskCount ; cnt++)   // Decrement tick from all delayed tasks
 {
      if(tcb[cnt].state == 3)
      {
+         tcb[cnt].ticks--;
          if(tcb[cnt].ticks == 0)
          {
-           tcb[cnt].state = 2;
-           continue;
+           tcb[cnt].state = STATE_READY;
          }
-         tcb[cnt].ticks--;
+
       }
 }
 }
@@ -376,38 +395,43 @@ for(cnt = 0 ; cnt < taskCount ; cnt++)     //For all tasks
 // REQUIRED: process UNRUN and READY tasks differently
 void pendSvIsr()
 {
-__asm(" ADD sp,#24");
-__asm(" PUSH {r4-r11}");
-tcb[taskCurrent].sp = (void *)__get_MSP();
-taskCurrent = rtosScheduler();
-__set_MSP((uint32_t)sp_system);
-if(tcb[taskCurrent].state == 2)
+__asm(" ADD sp,#24");   // Compensate for change is sp produced by registers saved by hardware (r0-3,r12,pc,lr)
+__asm(" PUSH {r4-r11}"); // Save registers r4-11
+tcb[taskCurrent].sp = (void *)__get_MSP();  // Save sp in task structure
+taskCurrent = rtosScheduler();           // Call next task
+__set_MSP((uint32_t)sp_system);          // Move to system sp
+if(tcb[taskCurrent].state == STATE_READY)          // READY tasks
 {
-__set_MSP((uint32_t)tcb[taskCurrent].sp);
+__set_MSP((uint32_t)tcb[taskCurrent].sp); // Set sp as the taskcurrent's sp
 __asm(" ADD sp,#8");
 __asm(" POP {r4-r11}");
-__asm(" SUB sp,#24");
+__asm(" SUB sp,#24");                     // Move to original value of sp when program entered the ISR
 }
-else if(tcb[taskCurrent].state == 1)
+else if(tcb[taskCurrent].state == 1)      // Un-Run tasks
 {
-   tcb[taskCurrent].state = 2;
- __set_MSP(((uint32_t)tcb[taskCurrent].sp - 8));
-__asm(" SUB sp,#0x24"); //Now it is an exception handler
+   tcb[taskCurrent].state = STATE_READY;
+ __set_MSP(((uint32_t)tcb[taskCurrent].sp - 8)); // Set sp as sp of unrun task
+
+ // Seeding stack to make it look it was interrupted
+
+__asm(" SUB sp,#0x24");                            // Push registers
 __asm(" MOV r0,#0x00000000");
-__asm(" ADD sp,#0x14");
+__asm(" ADD sp,#0x14");                            // Move sp to pc (PC of yield/sleep/wait/post in stored here)
 __asm(" STR r0,[sp]");
+__asm(" ADD sp,#0x4");                             // Move sp to pc of interrupted thread
+a = tcb[taskCurrent].pid; // Store the task pid in pc
+__asm(" STR r0,[sp]");                             // Store thread's pid into pc
 __asm(" ADD sp,#0x4");
-a = tcb[taskCurrent].pid;
-__asm(" STR r0,[sp]");
-__asm(" ADD sp,#0x4");
-__asm(" MOV r0,#0x41000000");
+__asm(" MOV r0,#0x41000000");                      // Store in xPSR  ( Thumb mode + Thread mode)
 __asm(" orr r0,#0x00000200");
 __asm(" STR r0,[sp]");
-__set_MSP(((uint32_t)tcb[taskCurrent].sp - 8));
-__asm(" SUB sp,#0x24");
+__set_MSP(((uint32_t)tcb[taskCurrent].sp - 8));   // Set sp as sp of unrun task
+__asm(" SUB sp,#0x24");                           // Pop registers
 }
+
 tcb[taskCurrent].instime++;
-__asm(" mov lr,#0xFF000000");
+
+__asm(" mov lr,#0xFF000000");                      // LR has EXEC_RETURN for return to thread mode
 __asm(" orr lr,lr,#0x00FF0000");
 __asm(" orr lr,lr,#0x0000FF00");
 __asm(" orr lr,lr,#0x000000F9");
@@ -420,17 +444,19 @@ void svCallIsr()
 {
      uint32_t svc_number,arg1;
      void *temp; uint8_t i,j;
-     __asm(" ADD sp,#0x20");  //Update number as per number of variables used
-     __asm(" LDR  r0,[sp,#0x18]");
-     __asm(" LDRH r0,[r0,#-2]");
-     __asm(" BIC  r0,r0,#0xFF00");
+     __asm(" ADD sp,#0x20");  // Compensate for local variables used
+     __asm(" LDR  r0,[sp,#0x18]"); // Move sp to point to pc
+     __asm(" LDRH r0,[r0,#-2]");    // Store half word(svc number)in r0
+     __asm(" BIC  r0,r0,#0xFF00");  // Mask first two bytes
       svc_number = (uint32_t)getr0();
-     __asm(" LDR r0,[sp,#0x24]");
+     __asm(" LDR r0,[sp,#0x24]"); // Move the stack pointer to get the value of first argument passed onto the stack and store in r0
       arg1 = (uint32_t)getr0();
+
+     // SVC handler
      switch(svc_number)
      {
      case svc_yield:
-         NVIC_INT_CTRL_R |= 0x10000000;
+         NVIC_INT_CTRL_R |= 0x10000000;  // Request task switch
          break;
      case svc_sleep:
          tcb[taskCurrent].ticks = arg1;
@@ -438,48 +464,58 @@ void svCallIsr()
          NVIC_INT_CTRL_R |= 0x10000000;
          break;
      case svc_wait:
-          temp = (&semaphores);
-          arg1 = arg1 - (uint32_t)temp;
-          arg1 = arg1 / 41;  //Change here
-          if(semaphores[arg1].count > 0)
+          temp = (&semaphores); // Get the pointer to semaphore structure
+          arg1 = arg1 - (uint32_t)temp; // Pointer to the semaphore passed in svc
+          arg1 = arg1 / 41;     // Semaphore number
+
+          // Priority Inheritance
+
+          if(pi && taskCurrent == 6) // Allow lengthfn to temporarily be hoisted to highest priority incase of PI.
+          {
+              if((tcb[semaphores[arg1].currentUser].priority > tcb[taskCurrent].priority))
+              {
+                  tcb[semaphores[arg1].currentUser].currentPriority = MIN(tcb[semaphores[arg1].currentUser].priority,tcb[taskCurrent].priority);
+                  tcb[semaphores[arg1].currentUser].skip_count = tcb[semaphores[arg1].currentUser].currentPriority + 8;
+
+              }
+          }
+
+          if(semaphores[arg1].count > 0) // Semaphore available
           {
              semaphores[arg1].count--;
-             semaphores[arg1].currentUser = taskCurrent;
+             semaphores[arg1].currentUser = taskCurrent; // Note last user of semaphore
 
           }
           else
           {
-
-
-                 semaphores[arg1].processQueue[semaphores[arg1].queueSize] = taskCurrent;
-                 tcb[taskCurrent].state = STATE_BLOCKED;
-                 tcb[taskCurrent].semaphore = (void *)arg1;
-                 semaphores[arg1].queueSize++;
-
-             if( pi == true)
-             {
-                 if((tcb[semaphores[arg1].currentUser].priority > tcb[taskCurrent].priority) && semaphores[arg1].currentUser!=0)
-                 {
-                     tcb[semaphores[arg1].currentUser].currentPriority = MIN(tcb[semaphores[arg1].currentUser].priority,tcb[taskCurrent].priority);
-
-                 }
-             }
-             NVIC_INT_CTRL_R |= 0x10000000;
+              semaphores[arg1].processQueue[semaphores[arg1].queueSize] = taskCurrent; // Add Current task to process queue
+              tcb[taskCurrent].state = STATE_BLOCKED;
+              tcb[taskCurrent].semaphore = (void *)arg1; //Record blocking semaphore
+              semaphores[arg1].queueSize++;
+              NVIC_INT_CTRL_R |= 0x10000000;
           }
            break;
      case svc_post:
-              temp = (&semaphores);
-              arg1 = arg1 - (uint32_t)temp;
-              arg1 = arg1 / 41;  //Change here
+              temp = (&semaphores);         // Get the pointer to semaphore structure
+              arg1 = arg1 - (uint32_t)temp; // Pointer to the semaphore passed in svc
+              arg1 = arg1 / 41;             // Semaphore number
+
               semaphores[arg1].count++;
-              tcb[taskCurrent].currentPriority = tcb[taskCurrent].priority;
+
+             if(tcb[taskCurrent].currentPriority != tcb[taskCurrent].priority) // Incase PI happened, restore priority to original value
+             {
+                 tcb[taskCurrent].currentPriority = tcb[taskCurrent].priority;
+                 tcb[taskCurrent].skip_count = tcb[taskCurrent].currentPriority + 8;
+             }
+
               if(semaphores[arg1].count == 1)
               {
                   if(semaphores[arg1].queueSize > 0)
                   {
-                      tcb[semaphores[arg1].processQueue[0]].state = 2;
+                      //NVIC_INT_CTRL_R |= 0x10000000;
+                      tcb[semaphores[arg1].processQueue[0]].state = STATE_READY; // Mark waiting task as ready
                       semaphores[arg1].queueSize--;
-                      for(i=0;i<((semaphores[arg1].queueSize)-1);i++)
+                      for(i=0;i<((semaphores[arg1].queueSize)-1);i++) // Move other waiting task up the queue.
                       {
                           semaphores[arg1].processQueue[i] = semaphores[arg1].processQueue[i+1];
 
@@ -488,14 +524,15 @@ void svCallIsr()
 
                   }
               }
+             // NVIC_INT_CTRL_R |= 0x10000000;
               break;
      case svc_delete:
          for(i = 0 ; i < MAX_TASKS ; i++ )
          {
-             if(tcb[i].pid == (void *)arg1)
+             if(tcb[i].pid == (void *)arg1) // Find pid of task to be deleted
                  break;
          }
-         if(tcb[i].state == STATE_BLOCKED)
+         if(tcb[i].state == STATE_BLOCKED) // Remove task from semaphore wait queue
          {
              for(j = 0 ; j < semaphores[(uint32_t)tcb[i].semaphore].queueSize;j++)
              {
@@ -507,7 +544,6 @@ void svCallIsr()
              {
                  semaphores[(uint32_t)tcb[i].semaphore].processQueue[j] = semaphores[(uint32_t)tcb[i].semaphore].processQueue[j+1];
              }
-
 
          }
          tcb[i].state = STATE_INVALID;
@@ -522,19 +558,20 @@ void svCallIsr()
      __asm(" BX LR");
 }
 
+// ISR to perform IIR filtering on cpu-time of tasks (1 Hz)
 void wideTimer5Isr()
 {
 static bool firstUpdate = true;
-float alpha = 0.8; //Scaled
+float alpha = 0.8; // Filter co-efficient
 uint8_t b;
 sum = 0;
 if (firstUpdate)
 {
     for(b = 0 ; b < taskCount ; b++)
     {
-       tcb[b].iirtime = tcb[b].instime;
+       tcb[b].iirtime = tcb[b].instime; // Let initial value be first sample
        sum += tcb[b].iirtime;
-       tcb[b].instime = 0;// Let initial value be first sample
+       tcb[b].instime = 0;
     }
 firstUpdate = false;
 }
@@ -542,7 +579,7 @@ else
 {
     for(b = 0 ; b < taskCount ; b++)
     {
-        tcb[b].iirtime = (uint32_t)(tcb[b].iirtime * alpha + tcb[b].instime * (1-alpha));
+        tcb[b].iirtime = (uint32_t)(tcb[b].iirtime * alpha + tcb[b].instime * (1-alpha)); // IIR filter
         sum += tcb[b].iirtime;
         tcb[b].instime = 0;
     }
@@ -616,7 +653,7 @@ void waitMicrosecond(uint32_t us)
 // REQUIRED: add code to return a value from 0-31 indicating which of 5 PBs are pressed
 uint8_t readPbs()
 {
-    return (((((GPIO_PORTA_DATA_R << 2) & 0x1F0)>>2)^(0x7C))>>2);
+    return (((((GPIO_PORTA_DATA_R << 2) & 0x1F0)>>2)^(0x7C))>>2);   // Reading only bits 2-6 of GPIO A register, memory mapped onto the address bus
 }
 
 //-----------------------------------------------------------------------------
@@ -626,7 +663,7 @@ uint8_t readPbs()
 // Blocking function that writes a serial character when the UART buffer is not full
 void putcUart0(char c)
 {
-    while ((UART0_FR_R & UART_FR_TXFF)!=0)
+    while ((UART0_FR_R & UART_FR_TXFF)!=0) //Blocking but can yield while it's blocking
     {
         yield();
     }
@@ -651,6 +688,8 @@ char getcUart0()
     return UART0_DR_R & 0xFF;
 }
 
+
+// Function to get a command from user through UART interface
 
 void getsUart0()
 {
@@ -692,6 +731,7 @@ l1:  c = getcUart0();
      }
 }
 
+// Function to pass the pid of the thread to be killed into destroythread kernal fn
 void kill()
 {
     uint8_t i;
@@ -699,7 +739,8 @@ void kill()
     _fn fn;
     for(i = 0;i<taskCount;i++)
     {
-        if(strcasecmp(&input[pos[1]],tcb[i].name)==0)
+        snprintf(str,sizeof str,"%p",tcb[i].pid);
+        if(strcasecmp(&input[pos[1]],str)==0)
         {
             c = 1;
             break;
@@ -712,17 +753,20 @@ void kill()
     destroyThread(fn);
     }
     else
-        putsUart0("Task doesn't exist");
+        putsUart0("Task doesn't exist\r\n");
 }
 
+// Function to move cursor to a particular coordinate on the terminal
 
 void moveCursor(uint8_t i , uint8_t j)
 {
     char l[20];
     snprintf(l, sizeof l, "%s%d%s%d%s","\033[",i,";",j,"H");
     putsUart0(l);
-
 }
+
+// Function to display the pid of a process
+
 void pidThread()
 {
     uint8_t r;
@@ -739,10 +783,13 @@ void pidThread()
     {
     snprintf(str,sizeof str,"%p",tcb[r].pid);
     putsUart0(str);
+    putsUart0("\r\n");
     }
     else
-        putsUart0("Thread doesn't exist");
+        putsUart0("Thread doesn't exist\r\n");
 }
+
+// Function to display semaphore status
 
 void ipcs()
 {
@@ -774,14 +821,19 @@ for( i = 0 ; i < MAX_SEMAPHORES-1 ; i++)
 }
 }
 
+// Function to display status of all running processes (% cpu updated every second)
+
 void ps()
 {
    uint32_t cpu = 0;
+   uint32_t cpu1 = 0;
    putsUart0("    Name     |     PID     |    Priority    |    %CPU      \r\n");
    putsUart0("-------------|-------------|----------------|--------------\r\n");
    uint8_t i = 0;
-   for(i = 0 ; i < taskCount ; i++)
+   for(i = 0 ; (i < taskCount); i++)
    {
+       if(tcb[i].pid == 0)
+           continue;
        putsUart0(tcb[i].name);
        putsUart0("     \t");
        snprintf(str,sizeof str,"%p",tcb[i].pid);
@@ -790,16 +842,45 @@ void ps()
        snprintf(str,sizeof str,"%d",tcb[i].priority);
        putsUart0(str);
        putsUart0("    \t");
-       cpu = (tcb[i].iirtime*1000) / sum ;
-       snprintf(str,sizeof str,"%d.%.2d", cpu / 10, cpu % 10);
+       if(rtos)
+       {
+           cpu1 = (tcb[i].iirtime*100) / sum;
+           snprintf(str,sizeof str,"%d",cpu1);
+           putsUart0(str);
+
+       }
+       else
+       {
+       cpu = (tcb[i].iirtime*1000) / sum; // Scaled cpu-time
+       snprintf(str,sizeof str,"%d.%.2d",cpu / 10,cpu % 10); //Reference : https://stackoverflow.com/questions/18465943/printf-how-to-insert-decimal-point-for-integer.
        putsUart0(str);
+       }
        putsUart0(" \r\n");
    }
+}
 
+// Function to restore a killed process
 
+void startThread()
+{
+   uint8_t i;
+   bool fnd = false;
+   for(i = 0 ; i < MAX_TASKS ; i++)
+   {
+       if(strcasecmp(&input[pos[1]],tcb[i].name)==0 && tcb[i].state == STATE_INVALID) //If task was killed
+       {
+           fnd = true;
+           break;
+       }
+   }
+   if(fnd)
+       createThread((_fn)tcb[i].orig_pid,tcb[i].name,0);    // Restore task
+   else
+       putsUart0("Thread doesn't exist");
 
 }
 
+// Parse input command from user into arguments
 
 void parseInput()
 {
@@ -807,10 +888,10 @@ uint8_t j = 0;
 uint8_t i = 0;
 uint8_t len = strlen(input);
 if(isspace(input[0]) | (ispunct(input[0]))) // Checking for space or punctuation in first entry
-    input[0] = '\0'; // Replacing all delimiters to null.
-else if(isalpha(input[0])) // Check for alphabets
+    input[0] = '\0';                        // Replacing all delimiters with null.
+else if(isalpha(input[0]))                  // Check for alphabets
 {
-    argc++;                  // Update argc , pos and type.
+    argc++;                                 // Update argc and pos
     pos[j++] = 0;
 
 }
@@ -843,12 +924,16 @@ else
 }
 }
 
+
+// Function to process the input buffer
+
 int isCommand()
 {
     uint8_t i;
-    for(i=0;i<8;i++)
+    bool ch = false;
+    for(i=0;i<9;i++)
     {
-    if(strcasecmp(&input[pos[0]],commands[i])==0) // Change it to strncasecmp
+    if(strcasecmp(&input[pos[0]],commands[i])==0)
     {
         switch(i+1)
         {
@@ -856,34 +941,42 @@ int isCommand()
             if(strcasecmp(&input[pos[1]],"on")==0)
             {
                 pi = 1;
+                schedule = 1;
+                ch = true;
                 return 0;
              }
             else if(strcasecmp(&input[pos[1]],"off")==0)
             {
                 pi = 0;
+                ch = true;
                 return 0;
             }
             else
-                putsUart0("Invalid argument for priority inheritance");
+                putsUart0("Invalid argument for priority inheritance\r\n");
             break;
         case 2:
             if(strcasecmp(&input[pos[1]],"on")==0)
             {
                 schedule = 1;
+                rtos = 0;
+                ch = true;
                 return 0;
             }
             else if(strcasecmp(&input[pos[1]],"off")==0)
             {
                  schedule = 0;
+                 ch = true;
                  return 0;
             }
             else
-                 putsUart0("Invalid argument for priority scheduling");
+                 putsUart0("Invalid argument for priority scheduling\r\n");
             break;
         case 3:
             if(strcasecmp(&input[pos[1]],"on")==0)
             {
                 rtos = 1;
+                schedule = 0;
+                ch = true;
                 return 0;
             }
             else if(strcasecmp(&input[pos[1]],"off")==0)
@@ -892,28 +985,39 @@ int isCommand()
                 ResetISR();
             }
             else
-                putsUart0("Invalid argument for preemption");
+                putsUart0("Invalid argument for preemption\r\n");
             break;
         case 4:
             ResetISR();
             break;
         case 5:
             pidThread();
+            ch = true;
             break;
         case 6:
             kill();
+            ch = true;
             break;
         case 7:
             ipcs();
+            ch = true;
             break;
         case 8:
             ps();
+            ch = true;
+            break;
+        case 9:
+            startThread();
+            ch = true;
             break;
         default:
-            putsUart0("Invalid Command!\r\n\r\n"); // Operation not supported by program
+            putsUart0("Invalid Command!\r\n"); // Operation not supported by program
+            break;
         }
      }
     }
+    if(ch == false)
+        putsUart0("Command not supported!! Try again !! \r\n");
     return 1;
 }
 //-----------------------------------------------------------------------------
@@ -1071,9 +1175,8 @@ void shell()
     while (true)
     {
         argc = 0;
-        putsUart0("Enter something!!\r\n\n"); // Create menu
+        putsUart0("Enter command!!\r\n\n"); // Create menu
         getsUart0();
-        //putsUart0(clearline);
         parseInput();
         putsUart0("\r\n");
         isCommand();
