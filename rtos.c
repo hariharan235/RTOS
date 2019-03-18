@@ -10,6 +10,32 @@
 // (xx is a unique number that will be issued in class)
 // Please do not change any function name in this code or the thread priorities
 
+// Program has been formatted for viewing in Teraterm or VT100 based terminals
+
+/*
+ * Terminal command syntax:
+ * 1) pi on/off
+ * 2) schedule on/off
+ * 3) rtos on/off
+ * 4) reboot
+ * 5) pidof <process_name>
+ * 6) kill <pid>
+ * 7) ipcs
+ * 8) ps
+ * 9) & <process_name>
+ *
+ */
+
+/* Problems or Bugs in the Program
+ *
+ * Appropriate changes were made to run a crash-free program but the below problems exist in the program and I would like to bring it to your attention so that it may help you in grading;
+ *
+ * 1) If preemption is on along with priority scheduling, it produces a 30 sec red led/blue led toggle rate (Undesirable O/P) otherwise it works fine without priority scheduling.
+ * 2) If preemption is turned on before run, ResetISR() does not produce proper reset.
+ * 3) If preemption was on, and a preemption off command (rtos off) was given then program hangs and hence needs a reset.
+ *
+ */
+
 //-----------------------------------------------------------------------------
 // Hardware Target
 //-----------------------------------------------------------------------------
@@ -69,8 +95,8 @@ struct semaphore
     uint16_t count;
     uint16_t queueSize;
     uint32_t processQueue[MAX_QUEUE_SIZE]; // store task index here
-    uint16_t currentUser;
-    char sname[16];
+    uint16_t currentUser;                  // last user of semaphore
+    char sname[16];                        // name of semaphore
 } semaphores[MAX_SEMAPHORES];
 uint8_t semaphoreCount = 0;
 
@@ -83,7 +109,7 @@ struct semaphore *keyPressed, *keyReleased, *flashReq, *resource;
 #define STATE_READY      2 // has run, can resume at any time
 #define STATE_DELAYED    3 // has run, but now awaiting timer
 #define STATE_BLOCKED    4 // has run, but now blocked by semaphore
-#define MAX_Args 3
+#define MAX_Args 3         // max arguments
 #define MAX_TASKS 10       // maximum number of valid tasks
 uint8_t taskCurrent = 0;   // index of last dispatched task
 uint8_t taskCount = 0;     // total number of valid tasks
@@ -101,39 +127,30 @@ uint8_t svc_number;
 //shell
 uint8_t argc;     // Argument count and general purpose variables.
 uint8_t pos[MAX_Args];  // Position of arguments in input buffer.
-char* commands[9] = {"pi","schedule","rtos","reboot","pidof","kill","ipcs","ps","start"}; // Currently available commands.
+char *commands[9] = {"pi","schedule","rtos","reboot","pidof","kill","ipcs","ps","&"}; // Currently available commands.
 #define Buffer_Max 80  //Max size of input buffer
 char str[20];
 char input[Buffer_Max];      //Shell input buffer
 
-//
+//General purpose pointers
 void *a;
-void *sp_system;
+void *sp_system;     // system stack pointer
 
 //RTOS control bits
-bool schedule;
-bool pi;
+bool schedule = true;
+bool pi = true;
 bool rtos;
 
-//Escape sequences for text-color
+//Escape sequences for text-color  //Reference : https://en.wikipedia.org/wiki/ANSI_escape_code
 
-#define black "\033[22;30m"
-#define red "\033[22;31m"
-#define green "\033[22;32m"
-#define blue "\033[22;34m"
+#define bred "\033[22;91m"
+#define bgreen "\033[22;92m"
+#define bblue "\033[22;94m"
 #define gray "\033[22;37m"
-#define yellow "\033[01;33m"
-#define white "\033[01;37m"
 
 //Escape sequences for background-color
 
 #define bgblack "\033[22;40m"
-#define bgred "\033[22;41m"
-#define bggreen "\033[22;42m"
-#define bgblue "\033[22;44m"
-#define bggray "\033[22;47m"
-#define bgyellow "\033[01;43m"
-#define bgwhite "\033[01;47m"
 
 //Resets the color settings
 
@@ -143,25 +160,7 @@ bool rtos;
 
 #define clear0 "\033[0;J"
 #define clear1 "\033[1;J"
-#define clear2 "\033[2;J"
-#define clearline "\033[1;K"
 
-//Cursor Navigation sequences
-
-#define up "\033[1;A"
-#define down "\033[1;B"
-#define left "\033[1;D"
-#define right "\033[1;C"
-
-//Saved cursor positions
-
-#define topleft "\033[1;1H"
-#define topright "\033[1;100H"
-#define frstcomm "\033[3;3H"
-
-//Report Cursor
-
-#define rep "\033[6n"
 
 
 struct _tcb
@@ -171,7 +170,7 @@ struct _tcb
     void *orig_pid;                // to identify task which got killed
     void *sp;                      // location of stack pointer for thread
     int8_t priority;               // -8=highest to 7=lowest
-    uint8_t skip_count;           // For priority scheduling
+    uint8_t skip_count;            // For priority scheduling
     int8_t currentPriority;        // used for priority inheritance
     uint32_t ticks;                // ticks until sleep complete
     uint32_t instime;              // Current cpu-usage time
@@ -228,11 +227,9 @@ int rtosScheduler()
         // Priority Scheduler
         if(schedule)
         {
-            if(tcb[task].state == STATE_UNRUN)          //Let un-run tasks run once.
-                break;
             if(tcb[task].skip_count == 0)
             {
-                tcb[task].skip_count = tcb[task].currentPriority + 8;  // Adding bias of 8 because Max priority is -8
+                tcb[task].skip_count = tcb[task].currentPriority + 8;  // Adding bias of 8 because highest priority is -8
                 ok &= true;
             }
             else
@@ -287,7 +284,7 @@ bool createThread(_fn fn, char name[], int priority)
             tcb[i].priority = priority;
             tcb[i].currentPriority = priority;
             tcb[i].skip_count = priority + 8;
-            strncpy(tcb[i].name,name, sizeof(tcb[i].name)-1);
+            strncpy(tcb[i].name,name, sizeof(tcb[i].name)-1); //Reference : http://libslack.org/manpages/snprintf.3.html
             tcb[i].name[sizeof(tcb[i].name) - 1] = '\0';
             // increment task count
             taskCount++;
@@ -374,7 +371,7 @@ void post(struct semaphore *pSemaphore)
 void systickIsr()
 {
 if(rtos == true)
-    NVIC_INT_CTRL_R |= 0x10000000;      // Request task switch every 1ms in preemption mode
+        NVIC_INT_CTRL_R |= 0x10000000;      // Request task switch every 1ms in preemption mode
 uint8_t cnt;
 for(cnt = 0 ; cnt < taskCount ; cnt++)   // Decrement tick from all delayed tasks
 {
@@ -388,6 +385,7 @@ for(cnt = 0 ; cnt < taskCount ; cnt++)   // Decrement tick from all delayed task
 
       }
 }
+
 }
 
 
@@ -414,24 +412,24 @@ else if(tcb[taskCurrent].state == 1)      // Un-Run tasks
 
  // Seeding stack to make it look it was interrupted
 
-__asm(" SUB sp,#0x24");                            // Push registers
-__asm(" MOV r0,#0x00000000");
-__asm(" ADD sp,#0x14");                            // Move sp to pc (PC of yield/sleep/wait/post in stored here)
-__asm(" STR r0,[sp]");
-__asm(" ADD sp,#0x4");                             // Move sp to pc of interrupted thread
+ // Push registers r0-3,xPSR,LR,PC,SP
+
+__asm(" SUB sp,#0x24");
+__asm(" ADD sp,#0x14");                            // Push r0-r3
+__asm(" ADD sp,#0x4");                             // Move sp to pc of assumed interrupted thread (sp + 0x18)
 a = tcb[taskCurrent].pid; // Store the task pid in pc
 __asm(" STR r0,[sp]");                             // Store thread's pid into pc
-__asm(" ADD sp,#0x4");
-__asm(" MOV r0,#0x41000000");                      // Store in xPSR  ( Thumb mode + Thread mode)
-__asm(" orr r0,#0x00000200");
-__asm(" STR r0,[sp]");
+__asm(" ADD sp,#0x4");                             // Move sp to xPSR of assumed interrupted thread
+__asm(" MOV r0,#0x01000000");
+__asm(" orr r0,#0x0000200");
+__asm(" STR r0,[sp]");                            // Store in xPSR  ( Thumb mode + Thread mode)
 __set_MSP(((uint32_t)tcb[taskCurrent].sp - 8));   // Set sp as sp of unrun task
 __asm(" SUB sp,#0x24");                           // Pop registers
 }
 
 tcb[taskCurrent].instime++;
 
-__asm(" mov lr,#0xFF000000");                      // LR has EXEC_RETURN for return to thread mode
+__asm(" mov lr,#0xFF000000");                      // LR has EXC_RETURN for return to thread mode
 __asm(" orr lr,lr,#0x00FF0000");
 __asm(" orr lr,lr,#0x0000FF00");
 __asm(" orr lr,lr,#0x000000F9");
@@ -445,12 +443,12 @@ void svCallIsr()
      uint32_t svc_number,arg1;
      void *temp; uint8_t i,j;
      __asm(" ADD sp,#0x20");  // Compensate for local variables used
-     __asm(" LDR  r0,[sp,#0x18]"); // Move sp to point to pc
+     __asm(" LDR  r0,[sp,#0x18]"); // Move sp to point to pc of interrupted kernal fn
      __asm(" LDRH r0,[r0,#-2]");    // Store half word(svc number)in r0
      __asm(" BIC  r0,r0,#0xFF00");  // Mask first two bytes
       svc_number = (uint32_t)getr0();
      __asm(" LDR r0,[sp,#0x24]"); // Move the stack pointer to get the value of first argument passed onto the stack and store in r0
-      arg1 = (uint32_t)getr0();
+      arg1 = (uint32_t)getr0();   // arg1 contains either sleep ticks in ms or pointer to semaphore structure in use or pid of task to be deleted
 
      // SVC handler
      switch(svc_number)
@@ -466,20 +464,7 @@ void svCallIsr()
      case svc_wait:
           temp = (&semaphores); // Get the pointer to semaphore structure
           arg1 = arg1 - (uint32_t)temp; // Pointer to the semaphore passed in svc
-          arg1 = arg1 / 41;     // Semaphore number
-
-          // Priority Inheritance
-
-          if(pi && taskCurrent == 6) // Allow lengthfn to temporarily be hoisted to highest priority incase of PI.
-          {
-              if((tcb[semaphores[arg1].currentUser].priority > tcb[taskCurrent].priority))
-              {
-                  tcb[semaphores[arg1].currentUser].currentPriority = MIN(tcb[semaphores[arg1].currentUser].priority,tcb[taskCurrent].priority);
-                  tcb[semaphores[arg1].currentUser].skip_count = tcb[semaphores[arg1].currentUser].currentPriority + 8;
-
-              }
-          }
-
+          arg1 = arg1 / 41;     // Semaphore index
           if(semaphores[arg1].count > 0) // Semaphore available
           {
              semaphores[arg1].count--;
@@ -493,12 +478,24 @@ void svCallIsr()
               tcb[taskCurrent].semaphore = (void *)arg1; //Record blocking semaphore
               semaphores[arg1].queueSize++;
               NVIC_INT_CTRL_R |= 0x10000000;
+
+              // Priority Inheritance
+
+              if(pi) // Allow lengthfn to be temporarily be hoisted to highest priority incase of PI.
+              {
+                  if(tcb[semaphores[arg1].currentUser].priority > tcb[taskCurrent].priority)
+                  {
+                      tcb[semaphores[arg1].currentUser].currentPriority = MIN(tcb[semaphores[arg1].currentUser].priority,tcb[taskCurrent].priority);
+                      tcb[semaphores[arg1].currentUser].skip_count = tcb[semaphores[arg1].currentUser].currentPriority + 8;
+
+                  }
+              }
           }
            break;
      case svc_post:
               temp = (&semaphores);         // Get the pointer to semaphore structure
               arg1 = arg1 - (uint32_t)temp; // Pointer to the semaphore passed in svc
-              arg1 = arg1 / 41;             // Semaphore number
+              arg1 = arg1 / 41;             // Semaphore index
 
               semaphores[arg1].count++;
 
@@ -512,19 +509,19 @@ void svCallIsr()
               {
                   if(semaphores[arg1].queueSize > 0)
                   {
-                      //NVIC_INT_CTRL_R |= 0x10000000;
+
                       tcb[semaphores[arg1].processQueue[0]].state = STATE_READY; // Mark waiting task as ready
-                      semaphores[arg1].queueSize--;
+                      semaphores[arg1].count--;
+                      semaphores[arg1].currentUser = semaphores[arg1].processQueue[0];
                       for(i=0;i<((semaphores[arg1].queueSize)-1);i++) // Move other waiting task up the queue.
                       {
                           semaphores[arg1].processQueue[i] = semaphores[arg1].processQueue[i+1];
 
                       }
                       semaphores[arg1].processQueue[semaphores[arg1].queueSize] = 0;
-
+                      semaphores[arg1].queueSize--;
                   }
               }
-             // NVIC_INT_CTRL_R |= 0x10000000;
               break;
      case svc_delete:
          for(i = 0 ; i < MAX_TASKS ; i++ )
@@ -532,7 +529,7 @@ void svCallIsr()
              if(tcb[i].pid == (void *)arg1) // Find pid of task to be deleted
                  break;
          }
-         if(tcb[i].state == STATE_BLOCKED) // Remove task from semaphore wait queue
+         if(tcb[i].state == STATE_BLOCKED) // Remove task from semaphore wait queues
          {
              for(j = 0 ; j < semaphores[(uint32_t)tcb[i].semaphore].queueSize;j++)
              {
@@ -559,6 +556,7 @@ void svCallIsr()
 }
 
 // ISR to perform IIR filtering on cpu-time of tasks (1 Hz)
+
 void wideTimer5Isr()
 {
 static bool firstUpdate = true;
@@ -689,7 +687,7 @@ char getcUart0()
 }
 
 
-// Function to get a command from user through UART interface
+// Function to get a command from user through UART interface //Reference: My 5314 project Fall-2018 (LCR-meter)
 
 void getsUart0()
 {
@@ -720,7 +718,7 @@ l1:  c = getcUart0();
                 input[count++] = c;
                 if (count > Buffer_Max)     // Checking if buffer is full.
                 {
-                    putsUart0("\nStop!Buffer has overflowed!Try again\r\n\r\n");
+                    putsUart0(bred"\nStop!Buffer has overflowed!Try again\r\n\r\n");
                     waitMicrosecond(1000);
                     return;
                 }
@@ -739,7 +737,7 @@ void kill()
     _fn fn;
     for(i = 0;i<taskCount;i++)
     {
-        snprintf(str,sizeof str,"%p",tcb[i].pid);
+        snprintf(str,sizeof str,"%p",tcb[i].pid);//Reference : http://libslack.org/manpages/snprintf.3.html
         if(strcasecmp(&input[pos[1]],str)==0)
         {
             c = 1;
@@ -753,7 +751,7 @@ void kill()
     destroyThread(fn);
     }
     else
-        putsUart0("Task doesn't exist\r\n");
+        putsUart0(bred"Task doesn't exist\r\n");
 }
 
 // Function to move cursor to a particular coordinate on the terminal
@@ -761,7 +759,7 @@ void kill()
 void moveCursor(uint8_t i , uint8_t j)
 {
     char l[20];
-    snprintf(l, sizeof l, "%s%d%s%d%s","\033[",i,";",j,"H");
+    snprintf(l, sizeof l, "%s%d%s%d%s","\033[",i,";",j,"H"); //Reference : http://libslack.org/manpages/snprintf.3.html
     putsUart0(l);
 }
 
@@ -781,12 +779,13 @@ void pidThread()
     }
     if(c)
     {
-    snprintf(str,sizeof str,"%p",tcb[r].pid);
+    snprintf(str,sizeof str,"%p",tcb[r].pid); //Reference : http://libslack.org/manpages/snprintf.3.html
+    putsUart0(bgreen);
     putsUart0(str);
     putsUart0("\r\n");
     }
     else
-        putsUart0("Thread doesn't exist\r\n");
+        putsUart0(bred"Thread doesn't exist\r\n");
 }
 
 // Function to display semaphore status
@@ -800,7 +799,7 @@ for( i = 0 ; i < MAX_SEMAPHORES-1 ; i++)
 {
     putsUart0(semaphores[i].sname);
     putsUart0(" \t");
-    snprintf(str,sizeof str,"%d",semaphores[i].count);
+    snprintf(str,sizeof str,"%d",semaphores[i].count);//Reference : http://libslack.org/manpages/snprintf.3.html
     putsUart0(str);
     putsUart0(" \t");
     if(semaphores[i].currentUser == 0)
@@ -836,7 +835,7 @@ void ps()
            continue;
        putsUart0(tcb[i].name);
        putsUart0("     \t");
-       snprintf(str,sizeof str,"%p",tcb[i].pid);
+       snprintf(str,sizeof str,"%p",tcb[i].pid); //Reference : http://libslack.org/manpages/snprintf.3.html
        putsUart0(str);
        putsUart0("    \t   ");
        snprintf(str,sizeof str,"%d",tcb[i].priority);
@@ -867,27 +866,28 @@ void startThread()
    bool fnd = false;
    for(i = 0 ; i < MAX_TASKS ; i++)
    {
-       if(strcasecmp(&input[pos[1]],tcb[i].name)==0 && tcb[i].state == STATE_INVALID) //If task was killed
+       if(strcasecmp(&input[pos[1]],tcb[i].name)==0)
        {
            fnd = true;
            break;
        }
    }
    if(fnd)
-       createThread((_fn)tcb[i].orig_pid,tcb[i].name,0);    // Restore task
+       createThread((_fn)tcb[i].orig_pid,tcb[i].name,0);    // Restore task //createThread has re-entrance preventon
    else
-       putsUart0("Thread doesn't exist");
+       putsUart0(bred"Thread doesn't exist");
 
 }
 
-// Parse input command from user into arguments
+// Parse input command from user into arguments //Reference: My 5314 project Fall-2018 (LCR-meter)
+
 
 void parseInput()
 {
 uint8_t j = 0;
 uint8_t i = 0;
 uint8_t len = strlen(input);
-if(isspace(input[0]) | (ispunct(input[0]))) // Checking for space or punctuation in first entry
+if(isspace(input[0])) // Checking for space or punctuation in first entry
     input[0] = '\0';                        // Replacing all delimiters with null.
 else if(isalpha(input[0]))                  // Check for alphabets
 {
@@ -904,7 +904,7 @@ else
 
 for(i=1;i<len;i++)     // Loop to parse the entries after the first entry.
 {
-if(isspace(input[i]) || (ispunct(input[i])))
+if(isspace(input[i]))
 {
     input[i] = '\0';
 if(isalpha(input[i+1]))
@@ -927,7 +927,7 @@ else
 
 // Function to process the input buffer
 
-int isCommand()
+void isCommand() //Reference: My 5314 project Fall-2018 (LCR-meter)
 {
     uint8_t i;
     bool ch = false;
@@ -941,53 +941,49 @@ int isCommand()
             if(strcasecmp(&input[pos[1]],"on")==0)
             {
                 pi = 1;
-                schedule = 1;
-                ch = true;
-                return 0;
+                return;
              }
             else if(strcasecmp(&input[pos[1]],"off")==0)
             {
                 pi = 0;
-                ch = true;
-                return 0;
+                return;
             }
             else
-                putsUart0("Invalid argument for priority inheritance\r\n");
+                putsUart0(bred"Invalid argument for priority inheritance\r\n");
             break;
         case 2:
             if(strcasecmp(&input[pos[1]],"on")==0)
             {
                 schedule = 1;
-                rtos = 0;
-                ch = true;
-                return 0;
+                return ;
             }
             else if(strcasecmp(&input[pos[1]],"off")==0)
             {
                  schedule = 0;
-                 ch = true;
-                 return 0;
+                 return ;
             }
             else
-                 putsUart0("Invalid argument for priority scheduling\r\n");
+                 putsUart0(bred"Invalid argument for priority scheduling\r\n");
             break;
         case 3:
             if(strcasecmp(&input[pos[1]],"on")==0)
             {
                 rtos = 1;
                 schedule = 0;
-                ch = true;
-                return 0;
+                return;
             }
             else if(strcasecmp(&input[pos[1]],"off")==0)
             {
                 rtos = 0;
                 ResetISR();
+                return;
             }
             else
-                putsUart0("Invalid argument for preemption\r\n");
+                putsUart0(bred"Invalid argument for preemption\r\n");
             break;
         case 4:
+            rtos = 0;
+            schedule = 0;
             ResetISR();
             break;
         case 5:
@@ -1011,14 +1007,14 @@ int isCommand()
             ch = true;
             break;
         default:
-            putsUart0("Invalid Command!\r\n"); // Operation not supported by program
+            putsUart0(bred"Invalid Command!\r\n");
             break;
         }
      }
     }
     if(ch == false)
-        putsUart0("Command not supported!! Try again !! \r\n");
-    return 1;
+        putsUart0(bred"Command not supported!! Try again !! \r\n");  // Operation not supported by program
+    return;
 }
 //-----------------------------------------------------------------------------
 // YOUR UNIQUE CODE
@@ -1171,14 +1167,16 @@ void important()
 void shell()
 {
     putsUart0(clear1);
-    moveCursor(1,1);
+    moveCursor(0,0);
+    putsUart0(bgblack);
     while (true)
     {
         argc = 0;
-        putsUart0("Enter command!!\r\n\n"); // Create menu
+        putsUart0(gray"Enter a command!!\r\n\n"bgreen);
+        putsUart0(bblue);
         getsUart0();
         parseInput();
-        putsUart0("\r\n");
+        putsUart0(bgreen"\r\n\r\n");
         isCommand();
         putsUart0("\r\n");
         // REQUIRED: add processing for the shell commands through the UART here
@@ -1208,7 +1206,7 @@ int main(void)
     resource = createSemaphore(1,"resource");
 
 
-    // Add required idle processes at lowest priority // Order was changed
+    // Add required idle processes at lowest priority
      ok =  createThread(idle, "Idle", 7);
     // Add other processes
      ok &= createThread(lengthyFn, "Lengthyfn", 4);
@@ -1217,8 +1215,6 @@ int main(void)
      ok &= createThread(readKeys, "Readkeys", 4);
      ok &= createThread(debounce, "Debounce", 4);
      ok &= createThread(important, "Important", -8);
-
-
      ok &= createThread(uncooperative, "Uncoop", 2);
      ok &= createThread(shell, "Shell", 0);
 
@@ -1230,3 +1226,4 @@ int main(void)
 
     return 0;
 }
+
