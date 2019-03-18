@@ -139,7 +139,7 @@ void *sp_system;     // system stack pointer
 //RTOS control bits
 bool schedule = true;
 bool pi = true;
-bool rtos;
+bool rtos ;
 
 //Escape sequences for text-color  //Reference : https://en.wikipedia.org/wiki/ANSI_escape_code
 
@@ -195,8 +195,8 @@ void rtosInit()
         tcb[i].pid = 0;
     }
     // REQUIRED: initialize systick for 1ms system timer
-    NVIC_ST_RELOAD_R |= 39999;     // 1 millisecond i.e  N = 40,000  clock pulses ...loading N-1 ; 1khz timer
-    NVIC_ST_CURRENT_R |= 0x01; //  Any value will clear it + count bit in CTRL_R
+    NVIC_ST_RELOAD_R |= 0x00009C3F;     // 1 millisecond i.e  N = 40,000  clock pulses ...loading N-1 ; 1khz timer
+    NVIC_ST_CURRENT_R |= 0; //  Any value will clear it + count bit in CTRL_R
 
     //Initializing WideTimer 5 for 1Hz periodic interrupts to calculate cpu-usage
 
@@ -252,7 +252,7 @@ void rtosStart()
     __set_MSP((uint32_t)tcb[taskCurrent].sp); // Initialize sp with the sp of task 0
     fn = (_fn)tcb[taskCurrent].pid;           // Initialize fn pointer with the pid of task 0
     tcb[taskCurrent].instime++;               // Increment cputime of task 0
-    NVIC_ST_CTRL_R  |= 0x07;                  // Enable systick Isr
+    NVIC_ST_CTRL_R |= 0x00000007;                 // Enable systick Isr
     WTIMER5_CTL_R |= TIMER_CTL_TAEN;          // turn-on widetimer 5 counter
     (*fn)();                                  // Call task 0
     // Add code to initialize the SP with tcb[task_current].sp;
@@ -414,15 +414,14 @@ else if(tcb[taskCurrent].state == 1)      // Un-Run tasks
 
  // Push registers r0-3,xPSR,LR,PC,SP
 
-__asm(" SUB sp,#0x24");
-__asm(" ADD sp,#0x14");                            // Push r0-r3
-__asm(" ADD sp,#0x4");                             // Move sp to pc of assumed interrupted thread (sp + 0x18)
-a = tcb[taskCurrent].pid; // Store the task pid in pc
+__asm(" SUB sp,#0x24");                             // Push r0-r3
+__asm(" ADD sp,#0x18");                             // Move sp to pc of assumed interrupted thread (sp + 0x18)
+a = tcb[taskCurrent].pid;                          // Store the task pid in pc
 __asm(" STR r0,[sp]");                             // Store thread's pid into pc
 __asm(" ADD sp,#0x4");                             // Move sp to xPSR of assumed interrupted thread
 __asm(" MOV r0,#0x01000000");
 __asm(" orr r0,#0x0000200");
-__asm(" STR r0,[sp]");                            // Store in xPSR  ( Thumb mode + Thread mode)
+__asm(" STR r0,[sp]");                            // Store in xPSR  ( Thumb state + Thread mode)
 __set_MSP(((uint32_t)tcb[taskCurrent].sp - 8));   // Set sp as sp of unrun task
 __asm(" SUB sp,#0x24");                           // Pop registers
 }
