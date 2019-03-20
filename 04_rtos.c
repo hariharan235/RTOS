@@ -26,15 +26,6 @@
  *
  */
 
-/* Problems or Bugs in the Program
- *
- * Appropriate changes were made to run a crash-free program but the below problems exist in the program and I would like to bring it to your attention so that it may help you in grading;
- *
- * 1) If preemption is on along with priority scheduling, it produces a 30 sec red led/blue led toggle rate (Undesirable O/P) otherwise it works fine without priority scheduling.
- * 2) If preemption is turned on before run, ResetISR() does not produce proper reset.
- * 3) If preemption was on, and a preemption off command (rtos off) was given then program hangs and hence needs a reset.
- *
- */
 
 //-----------------------------------------------------------------------------
 // Hardware Target
@@ -100,8 +91,7 @@ struct semaphore
 } semaphores[MAX_SEMAPHORES];
 uint8_t semaphoreCount = 0;
 
-struct semaphore *keyPressed, *keyReleased, *flashReq, *resource;
-
+struct semaphore *keyPressed, *keyReleased, *flashReq, *resource, *semaphoreptr; // Pointers to semaphore structure
 
 // task
 #define STATE_INVALID    0 // no task
@@ -139,7 +129,7 @@ void *sp_system;     // system stack pointer
 //RTOS control bits
 bool schedule = true;
 bool pi = true;
-bool rtos ;
+bool rtos;
 
 //Escape sequences for text-color  //Reference : https://en.wikipedia.org/wiki/ANSI_escape_code
 
@@ -225,17 +215,17 @@ int rtosScheduler()
         ok = (tcb[task].state == STATE_READY || tcb[task].state == STATE_UNRUN);
 
         // Priority Scheduler
-        if(schedule)
+        if(schedule && ok)
         {
-            if(tcb[task].skip_count == 0)
-            {
-                tcb[task].skip_count = tcb[task].currentPriority + 8;  // Adding bias of 8 because highest priority is -8
-                ok &= true;
-            }
-            else
+            if(tcb[task].skip_count > 0)
             {
                 tcb[task].skip_count--;
                 ok &= false;
+
+            }
+            else
+            {
+               tcb[task].skip_count = tcb[task].currentPriority + 8;  // Adding bias of 8 because highest priority is -8
             }
         }
     }
@@ -329,9 +319,11 @@ struct semaphore* createSemaphore(uint8_t count,char nam[])
 }
 
 // Function to store value in r0 onto a C variable
-void* getr0(void)            // Produces a missing return statement warning but does not affect the RTOS.
+uint32_t getr0(void)
 {
     __asm(" MOV r0,r0");
+    __asm(" BX LR");
+    return 0;
 }
 
 // REQUIRED: modify this function to yield execution back to scheduler using pendsv
@@ -373,17 +365,15 @@ void systickIsr()
 if(rtos == true)
         NVIC_INT_CTRL_R |= 0x10000000;      // Request task switch every 1ms in preemption mode
 uint8_t cnt;
-for(cnt = 0 ; cnt < taskCount ; cnt++)   // Decrement tick from all delayed tasks
+for(cnt = 0 ; cnt < taskCount; cnt++)   // Decrement tick from all delayed tasks
 {
      if(tcb[cnt].state == 3)
      {
-         tcb[cnt].ticks--;
-         if(tcb[cnt].ticks == 0)
-         {
+         if(tcb[cnt].ticks > 0)
+             tcb[cnt].ticks--;
+         else
            tcb[cnt].state = STATE_READY;
-         }
-
-      }
+     }
 }
 
 }
@@ -440,14 +430,15 @@ __asm(" BX LR");
 void svCallIsr()
 {
      uint32_t svc_number,arg1;
-     void *temp; uint8_t i,j;
+     uint8_t i,j;
+     void *temp;
      __asm(" ADD sp,#0x20");  // Compensate for local variables used
      __asm(" LDR  r0,[sp,#0x18]"); // Move sp to point to pc of interrupted kernal fn
      __asm(" LDRH r0,[r0,#-2]");    // Store half word(svc number)in r0
      __asm(" BIC  r0,r0,#0xFF00");  // Mask first two bytes
-      svc_number = (uint32_t)getr0();
+      svc_number = getr0();
      __asm(" LDR r0,[sp,#0x24]"); // Move the stack pointer to get the value of first argument passed onto the stack and store in r0
-      arg1 = (uint32_t)getr0();   // arg1 contains either sleep ticks in ms or pointer to semaphore structure in use or pid of task to be deleted
+      arg1 = getr0();   // arg1 contains either sleep ticks in ms or pointer to semaphore structure in use or pid of task to be deleted
 
      // SVC handler
      switch(svc_number)
@@ -461,42 +452,41 @@ void svCallIsr()
          NVIC_INT_CTRL_R |= 0x10000000;
          break;
      case svc_wait:
+          semaphoreptr = (struct semaphore*)arg1;
           temp = (&semaphores); // Get the pointer to semaphore structure
           arg1 = arg1 - (uint32_t)temp; // Pointer to the semaphore passed in svc
           arg1 = arg1 / 41;     // Semaphore index
-          if(semaphores[arg1].count > 0) // Semaphore available
+          if(semaphoreptr->count > 0) // Semaphore available
           {
-             semaphores[arg1].count--;
-             semaphores[arg1].currentUser = taskCurrent; // Note last user of semaphore
+             semaphoreptr->count--;
+             semaphoreptr->currentUser = taskCurrent; // Note last user of semaphore
+             tcb[taskCurrent].semaphore = NULL;
 
           }
           else
           {
-              semaphores[arg1].processQueue[semaphores[arg1].queueSize] = taskCurrent; // Add Current task to process queue
+              semaphoreptr->processQueue[semaphoreptr->queueSize] = taskCurrent; // Add Current task to process queue
               tcb[taskCurrent].state = STATE_BLOCKED;
               tcb[taskCurrent].semaphore = (void *)arg1; //Record blocking semaphore
-              semaphores[arg1].queueSize++;
+              semaphoreptr->queueSize++;
               NVIC_INT_CTRL_R |= 0x10000000;
 
               // Priority Inheritance
 
               if(pi) // Allow lengthfn to be temporarily be hoisted to highest priority incase of PI.
               {
-                  if(tcb[semaphores[arg1].currentUser].priority > tcb[taskCurrent].priority)
+                  if(tcb[semaphoreptr->currentUser].priority > tcb[taskCurrent].priority)
                   {
-                      tcb[semaphores[arg1].currentUser].currentPriority = MIN(tcb[semaphores[arg1].currentUser].priority,tcb[taskCurrent].priority);
-                      tcb[semaphores[arg1].currentUser].skip_count = tcb[semaphores[arg1].currentUser].currentPriority + 8;
+                      tcb[semaphoreptr->currentUser].currentPriority = MIN(tcb[semaphoreptr->currentUser].priority,tcb[taskCurrent].priority);
+                      tcb[semaphoreptr->currentUser].skip_count = tcb[semaphoreptr->currentUser].currentPriority + 8;
 
                   }
               }
           }
            break;
      case svc_post:
-              temp = (&semaphores);         // Get the pointer to semaphore structure
-              arg1 = arg1 - (uint32_t)temp; // Pointer to the semaphore passed in svc
-              arg1 = arg1 / 41;             // Semaphore index
-
-              semaphores[arg1].count++;
+              semaphoreptr = (struct semaphore*)arg1;
+              semaphoreptr->count++;
 
              if(tcb[taskCurrent].currentPriority != tcb[taskCurrent].priority) // Incase PI happened, restore priority to original value
              {
@@ -504,21 +494,21 @@ void svCallIsr()
                  tcb[taskCurrent].skip_count = tcb[taskCurrent].currentPriority + 8;
              }
 
-              if(semaphores[arg1].count == 1)
+              if(semaphoreptr->count == 1)
               {
-                  if(semaphores[arg1].queueSize > 0)
+                  if(semaphoreptr->queueSize > 0)
                   {
 
-                      tcb[semaphores[arg1].processQueue[0]].state = STATE_READY; // Mark waiting task as ready
-                      semaphores[arg1].count--;
-                      semaphores[arg1].currentUser = semaphores[arg1].processQueue[0];
-                      for(i=0;i<((semaphores[arg1].queueSize)-1);i++) // Move other waiting task up the queue.
+                      tcb[semaphoreptr->processQueue[0]].state = STATE_READY; // Mark waiting task as ready
+                      semaphoreptr->count--;
+                      semaphoreptr->currentUser = semaphoreptr->processQueue[0];
+                      for(i=0;i<((semaphoreptr->queueSize)-1);i++) // Move other waiting task up the queue.
                       {
-                          semaphores[arg1].processQueue[i] = semaphores[arg1].processQueue[i+1];
+                          semaphoreptr->processQueue[i] = semaphoreptr->processQueue[i+1];
 
                       }
-                      semaphores[arg1].processQueue[semaphores[arg1].queueSize] = 0;
-                      semaphores[arg1].queueSize--;
+                      semaphoreptr->processQueue[semaphoreptr->queueSize] = 0;
+                      semaphoreptr->queueSize--;
                   }
               }
               break;
@@ -559,9 +549,9 @@ void svCallIsr()
 void wideTimer5Isr()
 {
 static bool firstUpdate = true;
-float alpha = 0.8; // Filter co-efficient
 uint8_t b;
 sum = 0;
+// Filter co-efficient is 0.8
 if (firstUpdate)
 {
     for(b = 0 ; b < taskCount ; b++)
@@ -576,7 +566,7 @@ else
 {
     for(b = 0 ; b < taskCount ; b++)
     {
-        tcb[b].iirtime = (uint32_t)(tcb[b].iirtime * alpha + tcb[b].instime * (1-alpha)); // IIR filter
+        tcb[b].iirtime = (uint32_t)(tcb[b].iirtime * 0.2 + tcb[b].instime * 0.8); // IIR filter
         sum += tcb[b].iirtime;
         tcb[b].instime = 0;
     }
@@ -696,6 +686,7 @@ l1:  c = getcUart0();
      putcUart0(c);
      if ((c == 0x8) & (count == 0))  // Checking for backspace and if it is the first entry.
          goto l1;
+
      else if ((c == 0x8) & (count > 0))
         {
          count --;
@@ -1178,6 +1169,7 @@ void shell()
         putsUart0(bgreen"\r\n\r\n");
         isCommand();
         putsUart0("\r\n");
+        yield();
         // REQUIRED: add processing for the shell commands through the UART here
     }
 }
