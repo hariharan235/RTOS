@@ -1,3 +1,38 @@
+/*
+                                           *******************
+********************************************* C SOURCE FILE *********************************************
+**                                         *******************                                         **
+**                                                                                                     **
+**  Project             :    Preemptive/Cooperative RTOS                                               **
+**  Filename            :    04_rtos.c                                                                 **
+**  Version             :    1.0                                                                       **
+**  Date                :    February 7th, 2019                                                        **
+**  Target Platform     :    EK-TM4C123GXL Evaluation Board                                            **
+**  Target uC           :    TM4C123GH6PMI                                                             **
+**  IDE                 :    Code Composer Studio v7.4.0                                               **
+**  System Clock        :    40 MHz                                                                    **
+**  UART Baud Rate      :    115200                                                                    **
+**                                                                                                     **
+*********************************************************************************************************
+**                                                                                                     **
+**  Author : Hariharan Gopalakrishnan under the guidance of  Dr Jason H Losh , University of Texas at  **
+**           Arlington.                                                                                **
+**                                                                                                     **
+**                                                                                                     **
+**                                                                                                     **
+**  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR                         **
+**  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,                           **
+**  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE                        **
+**  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER                             **
+**  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,                      **
+**  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE                      **
+**  SOFTWARE.                                                                                          **
+**                                                                                                     **
+**  Copyright (c) : 2019 , Hariharan Gopalakrishnan , Dr Jason H Losh                                  **
+**  All rights reserved.                                                                               **
+*********************************************************************************************************
+
+
 // RTOS Framework - Spring 2019
 // J Losh
 
