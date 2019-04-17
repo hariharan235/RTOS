@@ -421,8 +421,9 @@ void pendSvIsr()
 __asm(" ADD sp,#24");   // Compensate for change is sp produced by registers saved by hardware (r0-3,r12,pc,lr)
 __asm(" PUSH {r4-r11}"); // Save registers r4-11
 tcb[taskCurrent].sp = (void *)__get_MSP();  // Save sp in task structure
-taskCurrent = rtosScheduler();           // Call next task
 __set_MSP((uint32_t)sp_system);          // Move to system sp
+taskCurrent = rtosScheduler();           // Call next task
+
 if(tcb[taskCurrent].state == STATE_READY)          // READY tasks
 {
 __set_MSP((uint32_t)tcb[taskCurrent].sp); // Set sp as the taskcurrent's sp
